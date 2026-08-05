@@ -1,0 +1,75 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@font-face {
+  font-family: 'Clash Display';
+  src: url('https://fonts.cdnfonts.com/s/17337/ClashDisplay-Bold.woff') format('woff');
+  font-weight: 700;
+}
+
+:root {
+  --ink: #082033;
+  --navy: #0C3B5E;
+  --blue: #2563EB;
+  --green: #22C55E;
+  --emerald: #16A34A;
+  --mint: #EAF7EF;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--mint);
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  color: var(--ink);
+  overflow-x: hidden;
+}
+
+.font-display {
+  font-family: 'Clash Display', 'Plus Jakarta Sans', sans-serif;
+}
+
+.font-mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Glass panel utility (uses existing palette, no new colors) */
+.glass-panel {
+  background: rgba(234, 247, 239, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1.5px solid rgba(12, 59, 94, 0.08);
+}
+
+/* Signature ambient backdrop: the green-to-blue "vibe" gradient used
+   behind hero/header sections across the app (mirrors the reference design) */
+.vibe-gradient {
+  background: linear-gradient(135deg, #BBF7D0 0%, #DBEAFE 55%, #BFDBFE 100%);
+}
+
+/* Press feedback for buttons/cards */
+.spring-active:active {
+  transform: scale(0.95);
+}
+
+/* Gentle floating loop, reused from Hero's ambient motion language */
+@keyframes floating {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+  100% { transform: translateY(0px); }
+}
+.floating {
+  animation: floating 3s ease-in-out infinite;
+}
