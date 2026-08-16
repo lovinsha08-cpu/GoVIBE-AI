@@ -52,7 +52,13 @@ export default function TripWizard() {
     setLoading(true);
     setError('');
     try {
-      const { trip } = await api.createTrip(data);
+      const { trip, geocodeWarnings } = await api.createTrip(data);
+      // Destination is guaranteed resolvable by the backend (422 otherwise —
+      // caught below), but start/end location geocode failures are
+      // non-fatal, so just surface them rather than blocking the trip.
+      if (geocodeWarnings?.length) {
+        console.warn('[trip] geocode warnings:', geocodeWarnings);
+      }
       const { itinerary } = await api.generateItinerary(trip.id);
       navigate(`/trip/${trip.id}/itinerary`, { state: { itinerary } });
     } catch (err) {

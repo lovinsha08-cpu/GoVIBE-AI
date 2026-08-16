@@ -56,7 +56,7 @@ create policy "Anyone can view verified businesses" on businesses
 create table if not exists spots (
   id uuid primary key default gen_random_uuid(),
   name text not null,
-  category text not null,              -- matches interest_categories.slug (e.g. "nature", "heritage")
+  category text not null,              -- matches interest_categories.slug (e.g. "nature_scenic", "heritage_historical")
   subcategory text,
   latitude double precision not null,
   longitude double precision not null,
@@ -222,17 +222,25 @@ alter table trips add column if not exists trip_name text;
 
 -- Seed interest taxonomy (mirrors frontend/src/lib/interestCategories.js)
 insert into interest_categories (slug, label, subcategories) values
-  ('nature', 'Nature & Outdoors', array['Beaches','Parks & Gardens','Lakes & Rivers','Waterfalls','Hills & Viewpoints','Wildlife Sanctuaries','Botanical Gardens']),
-  ('heritage', 'Culture & Heritage', array['Temples','Churches','Mosques','Forts & Palaces','Museums','Monuments','Art Galleries','Heritage Walks']),
-  ('adventure', 'Adventure', array['Trekking','Hiking','Camping','Cycling','Water Sports','Adventure Parks','Rock Climbing']),
-  ('food', 'Food & Dining', array['Street Food','Local Cuisine','Fine Dining','Cafés','Dessert Spots','Rooftop Restaurants']),
-  ('shopping', 'Shopping', array['Local Markets','Handicrafts','Souvenirs','Flea Markets','Shopping Malls']),
-  ('family', 'Family & Kids', array['Zoos','Aquariums','Science Centers','Children''s Parks','Theme Parks']),
-  ('nightlife', 'Entertainment', array['Live Music','Cultural Shows','Movie Theatres','Gaming & VR','Nightlife']),
-  ('relaxation', 'Relaxation', array['Resorts','Spas','Beach Walks','Picnic Spots','Sunset Points']),
-  ('photography', 'Photography', array['Scenic Viewpoints','Sunrise Spots','Sunset Spots','Architecture','Instagram-worthy Places']),
-  ('hidden_gems', 'Hidden Gems', array['Offbeat Attractions','Secret Beaches','Lesser-known Temples','Local Markets','Hidden Cafés'])
+  ('religious_spiritual', 'Religious & Spiritual', array['Temples','Churches','Mosques','Jain Temples','Gurudwaras','Ashrams']),
+  ('heritage_historical', 'Heritage & Historical', array['Forts','Memorials','Museums','Heritage Buildings','Monuments','Archaeological Sites']),
+  ('nature_scenic', 'Nature & Scenic', array['Beaches','Parks','Gardens','Lakes','Rivers & Backwaters','Eco Parks','Bird Sanctuaries','Mangroves']),
+  ('wildlife', 'Wildlife', array['Zoos','Aquariums','Snake Parks','Wildlife Parks']),
+  ('entertainment_recreation', 'Entertainment & Recreation', array['Amusement Parks','Water Parks','Theme Parks','Gaming Zones','Escape Rooms','Bowling Centres','Trampoline Parks']),
+  ('arts_culture', 'Arts & Culture', array['Art Galleries','Cultural Centres','Music & Dance Venues','Theatres','Exhibition Centres']),
+  ('science_learning', 'Science & Learning', array['Science Centres','Planetariums','Libraries','Educational Museums']),
+  ('shopping', 'Shopping', array['Shopping Malls','Street Markets','Flea Markets','Handicraft Stores','Textile & Silk Stores','Bookstores']),
+  ('food_dining', 'Food & Dining', array['Restaurants','Cafés','Street Food','Bakeries','Fine Dining','Rooftop Dining','Food Courts']),
+  ('photography_landmarks', 'Photography & Landmarks', array['Lighthouses','Viewpoints','Sunrise Spots','Sunset Spots','Iconic Landmarks','Instagram Spots']),
+  ('sports_adventure', 'Sports & Adventure', array['Stadiums','Sports Complexes','Go-Karting','Adventure Parks','Indoor Sports']),
+  ('wellness_leisure', 'Wellness & Leisure', array['Spas','Yoga Centres','Meditation Centres','Wellness Retreats']),
+  ('nightlife', 'Nightlife', array['Pubs','Lounges','Bars','Night Cafés','Live Music Venues'])
 on conflict (slug) do update set label = excluded.label, subcategories = excluded.subcategories;
+
+-- Categories retired from the master taxonomy above (2026 Chennai refresh).
+-- Deleted rather than updated in place since none of the old slugs map 1:1
+-- onto a single new category.
+delete from interest_categories where slug in ('nature','heritage','adventure','food','family','relaxation','photography','hidden_gems','transport_city');
 
 -- ============================================================
 -- Offers & Deals — Business Dashboard <-> Traveler Dashboard sync

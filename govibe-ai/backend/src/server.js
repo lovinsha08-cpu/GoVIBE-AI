@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import { env } from './config/env.js';
+import { checkSupabaseConnection } from './config/supabase.js';
 import routes from './routes/index.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
 
@@ -24,4 +25,8 @@ app.use(errorHandler);
 
 app.listen(env.port, () => {
   console.log(`GoVIBE AI backend running on http://localhost:${env.port}`);
+  // Fire-and-forget: logs a clear, specific reason at boot if Supabase is
+  // unreachable (paused project, bad URL, or no outbound internet) instead
+  // of waiting for the first signup/login attempt to surface a vague error.
+  checkSupabaseConnection();
 });

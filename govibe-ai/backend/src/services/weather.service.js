@@ -97,7 +97,7 @@ export function formatWeatherNote(forecast) {
   return `${forecast.label}${temp ? `, ${temp}` : ''}${rain}`.trim();
 }
 
-const OUTDOOR_CATEGORIES = new Set(['nature', 'adventure']);
+const OUTDOOR_CATEGORIES = new Set(['nature_scenic', 'sports_adventure', 'wildlife', 'photography_landmarks']);
 
 export function isOutdoorSpot(spot) {
   return OUTDOOR_CATEGORIES.has(spot.category);

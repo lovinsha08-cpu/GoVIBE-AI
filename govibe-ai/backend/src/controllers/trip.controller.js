@@ -34,6 +34,17 @@ export async function createTrip(req, res, next) {
     if (b.destination && destCoords.lat == null) geocodeWarnings.push(`Couldn't locate "${b.destination}"`);
     if (b.end_location && endCoords.lat == null) geocodeWarnings.push(`Couldn't locate "${b.end_location}"`);
 
+    // The destination MUST have coordinates — without them every spot's
+    // distance-from-anchor calculation comes out NaN, which silently drops
+    // every candidate spot later in itineraryEngine.service.js and surfaces
+    // as a confusing "No matching spots found" error at generation time
+    // instead of here, where the real cause (geocoding failed) is clear.
+    if (destCoords.lat == null || destCoords.lng == null) {
+      return res.status(422).json({
+        error: `Couldn't locate "${b.destination}". Please pick it from the suggestions dropdown instead of typing it freely, or try a nearby well-known place name.`,
+      });
+    }
+
     const { data, error } = await supabaseAdmin
       .from('trips')
       .insert({

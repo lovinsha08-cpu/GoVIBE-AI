@@ -127,7 +127,18 @@ export async function explainSpotChoice(spot, context) {
 }
 
 function heuristicReason(spot, context) {
-  const matched = context.interestLabels?.[0];
+  // Accommodation is never chosen for "interest match" — it's a place to
+  // sleep, picked on rating/location/budget. Using interestLabels[0]
+  // unconditionally here used to produce nonsense like "Matches your
+  // interest in religious_spiritual" on a hotel just because that
+  // happened to be the traveler's first selected interest category.
+  if (spot.category === 'stay' || spot.category === 'accommodation') {
+    return `A well-rated stay${spot.rating ? ` (${spot.rating}★)` : ''} near your planned route.`;
+  }
+  // Only claim an "interest match" for an interest that actually applies
+  // to this spot's category — not just whichever interest the traveler
+  // happened to select first.
+  const matched = context.interestLabels?.find((label) => label === spot.category) || null;
   if (matched) {
     return `Matches your interest in ${matched.toLowerCase()}, rated ${spot.rating || 'well'} by visitors.`;
   }
@@ -270,7 +281,7 @@ Generate a complete, DAY-BY-DAY itinerary that includes:
 6. For every attraction provide: name, short description, category, rating, opening time, closing time, entry fee, recommended visit duration, best time to visit, crowd level (Low/Medium/High), and photo URL if available.
 7. Recommend nearby restaurants after major attractions, with name, cuisine, average cost, rating, distance, and suitability for the user's food preference. Never reuse the same restaurant twice across the whole trip.
 8. Prefer famous, well-loved attractions first, then layer in hidden gems that match the user's interests instead of recommending only famous places — spread hidden gems across different days rather than clustered on one day.
-8b. In the "tips" field for every stop, briefly explain WHY that attraction was chosen for this specific traveler (interest match, uniqueness, timing, or local reputation) — not a generic filler line.
+8b. In the "tips" field for every stop, briefly explain WHY that attraction was chosen for this specific traveler (interest match, uniqueness, timing, or local reputation) — not a generic filler line. IMPORTANT: only cite "interest match" when the stop's category genuinely is one of the traveler's selected interests below. A hotel/stay is never an "interest match" — explain those on rating, location convenience, or budget fit instead. Never attribute a stop to an interest the traveler didn't select or that doesn't apply to that stop's category.
 9. Calculate a complete budget breakdown: transport, food, entry fees, accommodation, shopping allowance, emergency buffer, total estimated cost, remaining budget — for the WHOLE trip across all days.
 10. If weather conditions are unfavorable on a given day, replace outdoor attractions with indoor alternatives on that day and explain why the itinerary changed.
 11. If a place is closed or overcrowded, recommend an alternative attraction nearby.
@@ -288,6 +299,8 @@ IMPORTANT RULES
 - Stay within the user's budget.
 - Do not exceed the trip duration — use exactly the number of days given, no more, no fewer.
 - Prioritize attractions matching the user's interests.
+- Coverage: the traveler selected specific interest categories (see "Interests" below) — every one of those categories that has at least one genuine match in the Tourist Attractions Dataset MUST be represented by at least one stop somewhere across the whole trip. Do not let one or two categories dominate the itinerary while a selected interest gets zero stops just because other categories scored higher — spread stops across all selected interests first, then fill any remaining slots with the best overall picks. Only skip an interest entirely if the dataset genuinely has no matching place for it.
+- NEVER return an empty itinerary. If the traveler's selected interests genuinely have no (or very few) matches in the datasets for this destination, do not fail or return nothing — instead build the itinerary from the destination's most famous, highest-rated genuine attractions across whatever categories the dataset does have, and say so plainly in "summary" (e.g. "We couldn't find much matching [interest] here, so here are [destination]'s must-see spots instead"). A full itinerary built from the best available places is always better than an empty result.
 - Recommend lesser-known places whenever appropriate.
 - Avoid duplicate attractions across the whole trip, even on different days.
 - Ensure smooth transitions between locations within a day.
@@ -309,9 +322,12 @@ ACTIVITY BALANCE — build a plan a local guide would give, not a list of nearby
 - If Trip Style is "Food Explorer" or the traveler selected a "food" interest, you may feature more restaurants/cafés as real, named stops in their own right — but attractions should still anchor most days.
 - NEVER produce a sequence like Restaurant → Café → Restaurant → Café, or otherwise place two food stops back-to-back unless the traveler is clearly a food-focused trip and it's a deliberate, explained choice (e.g. a food-street crawl). A realistic day looks like: Tourist Attraction → Tourist Attraction → Lunch → Museum → Park → Sunset Point.
 - Schedule meals at realistic times, not randomly between every attraction: breakfast (if applicable) 7:00–9:00 AM, lunch 12:00–2:00 PM, an optional evening snack/café 4:00–5:30 PM, dinner (only if the day runs into the evening) 7:00–9:00 PM. Shorter days should have fewer meal stops, not one shoehorned in regardless.
+- Match the meal SLOT to the right kind of place: lunch and dinner must be a genuine sit-down restaurant (subcategory "Restaurants"), never a café. The evening snack slot must be a café/tea stop (subcategory "Cafés"), never a full restaurant. Never label a café as "Lunch" or "Dinner", and never label a restaurant as the café/snack stop.
 - Only include shopping destinations (markets, shopping streets, malls, souvenir shops) if the traveler selected a "shopping" interest — otherwise leave shopping out rather than defaulting to it.
 - Avoid two consecutive stops of the same type (e.g. Café → Café, Museum → Museum, Temple → Temple) — mix attraction types across the day while still respecting the traveler's selected interests and Trip Style.
-- Before finalizing, check your own itinerary array against these rules: is roughly 70–80% of each day genuine attractions, are meals only at realistic times and counts, are there no back-to-back same-type or back-to-back food stops, and is every place a genuine tourist/travel destination with no wholesale markets or administrative buildings? Fix anything that fails before returning.
+- Diversify subcategories, not just categories, across the WHOLE trip: never include more than one shopping mall in the entire itinerary — if the traveler wants shopping, mix subcategories instead (one mall, plus a street market, a bookstore, or a handicraft/textile store), rather than stacking multiple malls. The same applies to any other narrow, repeatable subcategory (e.g. don't schedule three separate "viewpoints" or three separate "flea markets") — prefer variety of experience over repeating the same type of place, even when several score similarly.
+- When the traveler picked several interests together (e.g. shopping, food, beach), actively interleave them across the trip rather than clustering all of one interest on one day and ignoring it elsewhere — the goal is a balanced mix shaped by time available, budget, and route efficiency, not a lopsided plan dominated by whichever category had the most candidates.
+- Before finalizing, check your own itinerary array against these rules: is roughly 70–80% of each day genuine attractions, are meals only at realistic times and counts with the correct restaurant-vs-café slot, are there no back-to-back same-type or back-to-back food stops, is no subcategory (e.g. malls) repeated across the trip when a mix was possible, and is every place a genuine tourist/travel destination with no wholesale markets or administrative buildings? Fix anything that fails before returning.
 
 =========================
 OUTPUT FORMAT

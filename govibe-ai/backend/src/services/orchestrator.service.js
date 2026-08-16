@@ -177,7 +177,13 @@ export async function orchestrateChat({ userId, role, message, location = null, 
         response = { error: err.message };
       }
       toolsUsed.push({ name: call.name, args: call.args || {} });
-      responseParts.push({ functionResponse: { name: call.name, response } });
+      // Gemini 3.x requires every functionResponse to echo back the `id`
+      // of its matching functionCall. Omitting it doesn't error — it just
+      // makes the model return an empty response (finish_reason: STOP) on
+      // the next turn, which looked like a silent/generic assistant
+      // failure even with a valid API key. See:
+      // https://ai.google.dev/gemini-api/docs/generate-content/whats-new-gemini-3.5
+      responseParts.push({ functionResponse: { name: call.name, response, ...(call.id ? { id: call.id } : {}) } });
     }
     contents.push({ role: 'user', parts: responseParts });
     round += 1;

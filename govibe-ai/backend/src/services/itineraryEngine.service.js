@@ -1,13 +1,14 @@
 import { loadSpots } from './spotData.service.js';
 import {
   selectBalancedSpots, findHiddenGems, hiddenGemReason, nearestInCategory,
-  splitRouteAndMealPools, diversifyConsecutive,
+  splitRouteAndMealPools, diversifyConsecutive, selectFallbackFamousSpots,
+  capStopsByCategory,
 } from './spotMatching.service.js';
 import { filterGenuineTouristSpots, isValidItineraryStop } from './attractionFilter.service.js';
 import { classifyAttractionTier } from './attractionRanking.service.js';
 import { getTripStylePacing } from './tripStyle.service.js';
 import { orderSpotsRoute, estimateCrowdLevel, suggestPublicTransport, suggestBestVisitTime, recommendTransportMode } from './routing.service.js';
-import { splitBudget, estimateSpotEntryCost, estimateMealCost, validateBudget } from './budget.service.js';
+import { splitBudget, estimateSpotEntryCost, estimateMealCost, validateBudget, checkBudgetFeasibility } from './budget.service.js';
 import { runFinalValidation } from './finalValidation.service.js';
 import { explainSpotChoice, generateFullItinerary, buildHeuristicTripSummary } from './ai.service.js';
 import { getDailyForecast, formatWeatherNote, isOutdoorSpot } from './weather.service.js';
@@ -40,18 +41,38 @@ export async function generateItinerary(trip) {
   //    replace the generic accommodation budget-split guess later.
   const dayCountForStay = Math.max(1, daysBetween(trip.start_date, trip.end_date));
   const nights = dayCountForStay > 1 ? dayCountForStay - 1 : 1;
-  const accommodation = trip.needs_accommodation
-    ? await findAccommodationRecommendation({ trip, groupSize, nights })
-    : null;
 
-  // 1. Fetch candidate spots within range of the destination.
-  //    (A tighter PostGIS radius query would replace this once spot volume grows.)
-  //    Falls back to the bundled sample dataset when Supabase isn't configured/seeded yet.
-  const { spots: rawCandidates, source: spotSource } = await loadSpots({
-    city: trip.destination,
-    lat: trip.destination_lat,
-    lng: trip.destination_lng,
-  });
+  // These four steps don't depend on each other's output, but used to run
+  // one after another with separate `await`s — each one's latency simply
+  // added onto the total instead of overlapping. Running them concurrently
+  // means the total wait is however long the SLOWEST one takes, not the
+  // sum of all four (accommodation/spot-loading in particular can each
+  // take several seconds against live external APIs).
+  const [accommodation, spotsResult, forecast, learnedPreferences] = await Promise.all([
+    trip.needs_accommodation
+      ? findAccommodationRecommendation({ trip, groupSize, nights })
+      : Promise.resolve(null),
+    // 1. Fetch candidate spots within range of the destination.
+    //    (A tighter PostGIS radius query would replace this once spot volume grows.)
+    //    Falls back to the bundled sample dataset when Supabase isn't configured/seeded yet.
+    loadSpots({
+      city: trip.destination,
+      lat: trip.destination_lat,
+      lng: trip.destination_lng,
+      interests: trip.interests || [],
+    }),
+    // 1b. Live weather forecast for the destination on the trip's start date —
+    //     fetched once up front so both the Gemini path and the heuristic
+    //     path below can use it for weather-aware adjustments.
+    getDailyForecast({ lat: trip.destination_lat, lng: trip.destination_lng, date: trip.start_date }),
+    // 1c'. Personalized learning: look at this traveler's past trips (if any)
+    //      and softly boost interest categories they've consistently liked,
+    //      so itineraries get more personalized the more the traveler uses
+    //      the app — without overriding what they explicitly chose this trip.
+    learnTravelerPreferences(trip.traveler_id, trip.id),
+  ]);
+
+  const { spots: rawCandidates, source: spotSource } = spotsResult;
   // Belt-and-braces: loadSpots already filters by source, but re-validate
   // here too so every entry point into itinerary generation is protected.
   const candidates = filterGenuineTouristSpots(rawCandidates);
@@ -60,19 +81,6 @@ export async function generateItinerary(trip) {
   }
 
   const tripStylePacing = getTripStylePacing(trip.trip_style);
-
-  // 1b. Live weather forecast for the destination on the trip's start date —
-  //     fetched once up front so both the Gemini path and the heuristic
-  //     path below can use it for weather-aware adjustments.
-  const forecast = await getDailyForecast({
-    lat: trip.destination_lat, lng: trip.destination_lng, date: trip.start_date,
-  });
-
-  // 1c'. Personalized learning: look at this traveler's past trips (if any)
-  //      and softly boost interest categories they've consistently liked,
-  //      so itineraries get more personalized the more the traveler uses
-  //      the app — without overriding what they explicitly chose this trip.
-  const learnedPreferences = await learnTravelerPreferences(trip.traveler_id, trip.id);
   const boostedInterests = applyLearnedInterestBoost(trip.interests || [], learnedPreferences);
 
   // 1c. If Gemini is configured, let it generate the whole itinerary first —
@@ -94,13 +102,13 @@ export async function generateItinerary(trip) {
   //    dominated by attractions (Part 6) instead of restaurants/cafés and
   //    markets crowding out sightseeing.
   const wantsFoodFeatured = trip.trip_style === 'food_explorer'
-    || (trip.interests || []).some((i) => i.category === 'food');
+    || (trip.interests || []).some((i) => i.category === 'food_dining');
   const wantsShopping = (trip.interests || []).some((i) => i.category === 'shopping');
 
   const dayCount = Math.max(1, daysBetween(trip.start_date, trip.end_date));
   const stopsPerDay = Math.max(1, Math.round(3 * tripStylePacing.stopsPerDayMultiplier)); // ~3 stops/day, reshaped by Trip Style
   const spotLimit = Math.min(candidates.length, dayCount * stopsPerDay);
-  const selected = selectBalancedSpots(candidates, {
+  let selected = selectBalancedSpots(candidates, {
     interests: boostedInterests,
     anchor,
     limit: spotLimit,
@@ -109,8 +117,25 @@ export async function generateItinerary(trip) {
     featureFood: wantsFoodFeatured,
   });
 
+  // Fallback: the traveler's selected interests genuinely don't match
+  // anything near this destination (e.g. "Beaches" for a landlocked hill
+  // town) — rather than failing itinerary generation outright, fall back
+  // to the destination's most famous/well-rated genuine tourist
+  // attractions so the traveler still gets a real, usable plan. A note is
+  // surfaced in the trip summary/extras so the traveler understands why
+  // the results don't match what they picked.
+  let interestFallbackNote = null;
   if (selected.length === 0) {
-    throw new Error('No matching spots found for the selected interests near this destination.');
+    selected = selectFallbackFamousSpots(candidates, {
+      anchor, limit: spotLimit, includeShopping: true,
+    });
+    if (selected.length > 0) {
+      interestFallbackNote = `We couldn't find spots matching your selected interests near ${trip.destination}, so here are the most popular tourist attractions in the area instead.`;
+    }
+  }
+
+  if (selected.length === 0) {
+    throw new Error('No genuine tourist spots found near this destination — spot data may need to be seeded for this city.');
   }
 
   // 2b. Food candidates set aside for deliberate meal scheduling (Part 7) —
@@ -158,6 +183,12 @@ export async function generateItinerary(trip) {
   const rawDayBuckets = chunkIntoDays(ordered, dayCount);
   const dayBuckets = rawDayBuckets
     .map((bucket) => applyTimeOfDayOrdering(bucket))
+    // Two passes: broad category first (stops the "food, food, food, food"
+    // / "mall, mall" runs the PDF export was showing — chunkIntoDays above
+    // already spreads categories across days, this catches whatever still
+    // lands adjacent within one day), then subcategory (finer-grained —
+    // "Temple A, Temple B" back-to-back within the same category).
+    .map((bucket) => diversifyConsecutive(bucket, (it) => it.spot.category))
     .map((bucket) => diversifyConsecutive(bucket, (it) => it.spot.subcategory || it.spot.category));
   const startAnchor = { lat: trip.start_lat || trip.destination_lat, lng: trip.start_lng || trip.destination_lng };
 
@@ -186,9 +217,36 @@ export async function generateItinerary(trip) {
 
     if (planEntry.kind === 'meal') {
       const anchorPoint = lastCoords || startAnchor;
-      const nearestMeal = nearestInCategory(mealPool, 'food', { lat: anchorPoint.lat, lng: anchorPoint.lng }, {
-        maxRadiusKm: 5, exclude: usedMealSpotIds,
-      });
+      // Prefer the subcategory that actually fits the meal slot — lunch and
+      // dinner are full sit-down meals (Restaurants), while the "cafe" slot
+      // is the evening snack/tea break (Cafés). Without this, "nearest
+      // food_dining spot" was picked regardless of type, so a café could
+      // land as the lunch stop and a full restaurant as the snack stop.
+      // If nothing matching that preference is within range, fall back to
+      // any food_dining spot nearby rather than dropping the meal slot.
+      // Exclude against `usedSpotIds` (not just `usedMealSpotIds`) — that
+      // set already contains every spot seated anywhere in the trip so
+      // far, including any food_dining spot already featured as its own
+      // attraction stop (Food Explorer style). Without this, the same
+      // restaurant could be scheduled as a stop AND picked again later
+      // for lunch/dinner/café.
+      const mealSubcategoryPreference = {
+        lunch: ['Restaurants'],
+        dinner: ['Restaurants'],
+        cafe: ['Cafés'],
+        breakfast: ['Cafés', 'Restaurants'],
+      }[planEntry.mealType] || null;
+
+      let nearestMeal = mealSubcategoryPreference
+        ? nearestInCategory(mealPool, 'food_dining', { lat: anchorPoint.lat, lng: anchorPoint.lng }, {
+            maxRadiusKm: 5, exclude: usedSpotIds, subcategories: mealSubcategoryPreference,
+          })
+        : null;
+      if (!nearestMeal) {
+        nearestMeal = nearestInCategory(mealPool, 'food_dining', { lat: anchorPoint.lat, lng: anchorPoint.lng }, {
+          maxRadiusKm: 5, exclude: usedSpotIds,
+        });
+      }
       if (!nearestMeal) continue; // no food candidate nearby left to schedule — skip this meal slot rather than force one
       if (!nearestMeal || !nearestMeal.spot) {
           console.warn("Invalid nearestMeal:", nearestMeal);
@@ -271,26 +329,23 @@ export async function generateItinerary(trip) {
     });
     totalEntryCost += entryCost;
 
-    const reasoning = await explainSpotChoice(spot, { interestLabels });
+    // Reasoning used to be fetched here with `await`, one Gemini call per
+    // stop, one after another — for a 10-15 stop trip that's 10-15 serial
+    // round-trips (each with its own timeout/retry) stacking up in the
+    // critical path. It's filled in below, once, for every stop at once
+    // via Promise.all — same total work, done concurrently instead of
+    // sequentially.
+    const reasoning = null;
 
-    // Restaurant/meal suggestion near this stop — skip for stops that are
-    // themselves food spots or lodging, and for stops immediately next to
-    // a deliberately-scheduled meal stop (that's already covered above).
-    let mealSuggestion = null;
-    if (!mealTypeLabel && !['food', 'stay'].includes(spot.category)) {
-      const nearby = nearestInCategory(candidates, 'food', { lat: spot.latitude, lng: spot.longitude }, {
-        maxRadiusKm: 3, exclude: usedSpotIds,
-      });
-      if (nearby) {
-        mealSuggestion = {
-          name: nearby.spot.name,
-          distance_km: nearby.distanceKm,
-          rating: nearby.spot.rating ?? null,
-          avg_cost_inr: nearby.spot.entry_fee_inr || null,
-          description: nearby.spot.description || null,
-        };
-      }
-    }
+    // Restaurant/meal suggestion near this stop: intentionally NOT
+    // generated per-attraction anymore. Food is already fully covered by
+    // the deliberately-scheduled meal-time stops (breakfast/lunch/cafe/
+    // dinner — one each, added in buildDayPlan above); attaching another
+    // "nearby food recommendation" to every single attraction stop on top
+    // of that meant a day could show several food suggestions at once
+    // instead of exactly one per meal time. `mealSuggestion` stays null
+    // for every non-meal stop.
+    const mealSuggestion = null;
     const publicTransport = suggestPublicTransport(distanceKmFromPrev);
     const bestVisitTime = suggestBestVisitTime(spot.category, isWeekend);
     const nearbyAttractionsList = nearbyAttractions(candidates, spot, usedSpotIds, { limit: 3, maxRadiusKm: 2.5 });
@@ -340,6 +395,14 @@ export async function generateItinerary(trip) {
     } // end per-stop loop
   } // end per-day loop
 
+  // Fill in every stop's AI reasoning concurrently now that the schedule
+  // itself (times, ordering, costs) is fully built — see the note above
+  // where `reasoning` was set to null. This is the single biggest latency
+  // win available here: N sequential Gemini calls become one batch of N
+  // parallel calls.
+  const reasonings = await Promise.all(stops.map((s) => explainSpotChoice(s, { interestLabels })));
+  stops.forEach((s, i) => { s.reasoning = reasonings[i]; });
+
   // 4b. Final validation (Part 7): make sure nothing that slipped through
   // is a government office, administrative building, or other non-tourism
   // place. Any invalid stop is swapped for the next best unused candidate
@@ -362,10 +425,22 @@ export async function generateItinerary(trip) {
   // 5. Budget summary — estimates a category breakdown for the total budget
   //    so the itinerary results page can show/track it; this is a byproduct
   //    of itinerary generation, not a user-facing input.
+  // Only allocate a slice of the budget to "accommodation" when a stay was
+  // both requested AND actually found — `trip.needs_accommodation` alone
+  // used to be enough to carve out ~35% of the budget into that bucket,
+  // so a trip where no accommodation could be found (or a day trip that
+  // never asked for one, covered separately below) still reported a real
+  // rupee cost for a stay that never appears anywhere else in the plan —
+  // the PDF could (and did) show both "no accommodation was found" and a
+  // non-zero accommodation line in the same document. When that money
+  // isn't really being spent, it belongs back with the buckets that fund
+  // the actual itinerary (food/transport/experience), same as the
+  // existing !needsAccommodation redistribution below.
+  const accommodationSecured = Boolean(trip.needs_accommodation && accommodation);
   const budgetSplit = splitBudget({
     totalBudgetInr: trip.total_budget_inr,
     interests: boostedInterests,
-    needsAccommodation: trip.needs_accommodation,
+    needsAccommodation: accommodationSecured,
   });
 
   const mealCostPerDay = estimateMealCost(trip.food_preferences, groupSize, 3); // 3 meals/day
@@ -419,32 +494,87 @@ export async function generateItinerary(trip) {
     entryFeesInr: totalEntryCost,
   });
 
+  // Budget Feasibility: food + transport alone (i.e. the cost of the trip
+  // with ZERO attraction stops) checked against the stated budget *before*
+  // any trimming is attempted. This used to be skipped entirely, so the
+  // only corrective action available was dropping the single highest
+  // entry-fee stop — which does nothing when every candidate nearby is a
+  // free-entry spot (malls, parks, viewpoints), leaving a budget overshoot
+  // reported with no real attempt to close it and no explanation of why.
+  const budgetFeasibility = checkBudgetFeasibility({
+    totalBudgetInr: trip.total_budget_inr,
+    transportCostInr: transportCostEstimate,
+    foodCostInr: estimatedFoodCost,
+  });
+
   // 6c. Step 10 — Final Validation: run the full checklist. If the only
-  // thing that failed is the budget check, auto-regenerate just that
-  // section (drop the single most expensive non-essential — i.e. not
-  // Must Visit tier, not a meal — stop) rather than surfacing a poor
-  // itinerary or discarding the whole plan over one overshoot.
-  let finalValidation = runFinalValidation({ stops, candidates, hiddenGems, budgetValidation, tripStartHour });
-  if (!finalValidation.passed && finalValidation.failedCheckIds.length === 1 && finalValidation.failedCheckIds[0] === 'budget_respected') {
-    const trimmable = stops
-      .filter((s) => !s.meal_type && s.category !== 'accommodation' && classifyAttractionTier(candidates.find((c) => c.id === s.spot_id) || {}) !== 'must_visit')
-      .sort((a, b) => (b.entry_cost_inr || 0) - (a.entry_cost_inr || 0));
-    if (trimmable.length > 0) {
+  // thing that failed is the budget check AND the shortfall is actually
+  // recoverable by dropping stops (i.e. food+transport alone still fit the
+  // budget), iteratively drop the most expensive non-essential — i.e. not
+  // Must Visit tier, not a meal — stops one at a time until the plan fits,
+  // the trimmable pool runs out, or a floor of stops is reached, rather
+  // than a single drop that silently no-ops whenever entry fees are ₹0.
+  const requestedCategoriesForValidation = [...new Set((trip.interests || []).map((i) => i.category).filter(Boolean))];
+  let finalValidation = runFinalValidation({
+    stops, candidates, hiddenGems, budgetValidation, tripStartHour, requestedCategories: requestedCategoriesForValidation,
+  });
+
+  // Interest-diversity auto-fix: if the route ended up dominated by one
+  // category despite the traveler requesting several, swap the overflow
+  // stops for genuine unused candidates from the under-represented
+  // categories — the same repair the Gemini path already applies (see
+  // capStopsByCategory usage further below) — rather than shipping a
+  // "technically valid" itinerary that quietly ignored half the trip's
+  // requested interests.
+  if (!finalValidation.passed && finalValidation.failedCheckIds.includes('interest_diversity_respected')) {
+    stops = capStopsByCategory(stops, candidates, requestedCategoriesForValidation, {
+      anchor: { lat: trip.destination_lat, lng: trip.destination_lng },
+    });
+    stops.forEach((s, i) => { s.order = i + 1; });
+    totalEntryCost = stops.reduce((sum, s) => sum + (Number(s.entry_cost_inr) || 0), 0);
+    budgetValidation = validateBudget({
+      totalBudgetInr: trip.total_budget_inr,
+      transportCostInr: estimateTransportCostForStops(stops),
+      foodCostInr: estimatedFoodCost,
+      entryFeesInr: totalEntryCost,
+    });
+    finalValidation = runFinalValidation({
+      stops, candidates, hiddenGems, budgetValidation, tripStartHour, requestedCategories: requestedCategoriesForValidation,
+    });
+  }
+
+  const MIN_STOPS_AFTER_TRIM = Math.max(2, Math.ceil(dayCount * 1)); // never trim below ~1 stop/day
+  if (
+    !finalValidation.passed
+    && finalValidation.failedCheckIds.length === 1
+    && finalValidation.failedCheckIds[0] === 'budget_respected'
+    && budgetFeasibility.feasible
+  ) {
+    let guard = 0; // safety net against any unforeseen infinite loop
+    while (!budgetValidation.within_budget && guard < 25) {
+      guard += 1;
+      const trimmable = stops
+        .filter((s) => !s.meal_type && s.category !== 'accommodation'
+          && (s.entry_cost_inr || 0) > 0
+          && classifyAttractionTier(candidates.find((c) => c.id === s.spot_id) || {}) !== 'must_visit')
+        .sort((a, b) => (b.entry_cost_inr || 0) - (a.entry_cost_inr || 0));
+      if (trimmable.length === 0 || stops.length <= MIN_STOPS_AFTER_TRIM) break;
       const drop = trimmable[0];
       const idx = stops.findIndex((s) => s.spot_id === drop.spot_id && s.order === drop.order);
-      if (idx !== -1) {
-        stops.splice(idx, 1);
-        stops.forEach((s, i) => { s.order = i + 1; });
-        totalEntryCost -= drop.entry_cost_inr || 0;
-        budgetValidation = validateBudget({
-          totalBudgetInr: trip.total_budget_inr,
-          transportCostInr: estimateTransportCostForStops(stops),
-          foodCostInr: estimatedFoodCost,
-          entryFeesInr: totalEntryCost,
-        });
-        finalValidation = runFinalValidation({ stops, candidates, hiddenGems, budgetValidation, tripStartHour });
-      }
+      if (idx === -1) break;
+      stops.splice(idx, 1);
+      stops.forEach((s, i) => { s.order = i + 1; });
+      totalEntryCost -= drop.entry_cost_inr || 0;
+      budgetValidation = validateBudget({
+        totalBudgetInr: trip.total_budget_inr,
+        transportCostInr: estimateTransportCostForStops(stops),
+        foodCostInr: estimatedFoodCost,
+        entryFeesInr: totalEntryCost,
+      });
     }
+    finalValidation = runFinalValidation({
+      stops, candidates, hiddenGems, budgetValidation, tripStartHour, requestedCategories: requestedCategoriesForValidation,
+    });
   }
 
   const budgetSummary = {
@@ -452,6 +582,17 @@ export async function generateItinerary(trip) {
     entry_fees_total_inr: totalEntryCost,
     estimated_food_cost_inr: estimatedFoodCost,
     total_budget_inr: trip.total_budget_inr,
+    // Surfaced so the results page / PDF can explain *why* the plan is over
+    // budget when trimming stops genuinely can't close the gap — e.g. food
+    // and transport for this many travelers, over this many days, already
+    // exceed what was budgeted, regardless of which attractions are picked.
+    budget_feasibility: budgetFeasibility.feasible
+      ? null
+      : {
+          bare_minimum_inr: budgetFeasibility.bareMinimumInr,
+          shortfall_inr: budgetFeasibility.shortfallInr,
+          note: `Food and transport alone for ${groupSize} traveler(s) over ${dayCount} day(s) come to about ₹${budgetFeasibility.bareMinimumInr.toLocaleString('en-IN')} — already ₹${budgetFeasibility.shortfallInr.toLocaleString('en-IN')} over the ₹${Number(trip.total_budget_inr).toLocaleString('en-IN')} budget before any attractions are added. Consider raising the budget, choosing a cheaper food preference, or shortening the trip.`,
+        },
     per_spot: stops.map((s) => ({ name: s.name, entry_cost_inr: s.entry_cost_inr })),
     budget_validation: budgetValidation,
     ai_extras: {
@@ -466,6 +607,7 @@ export async function generateItinerary(trip) {
       journey,
       final_validation: finalValidation,
       booking_itinerary: bookingItinerary,
+      interest_fallback_note: interestFallbackNote,
     },
   };
 
@@ -480,6 +622,7 @@ export async function generateItinerary(trip) {
     totalDurationMinutes: journey.route_summary.total_travel_minutes,
     generatedBy: 'heuristic+gemini',
     spotSource, // 'supabase' | 'sample' — lets the frontend flag demo data
+    interestFallbackNote,
   };
 }
 
@@ -494,9 +637,30 @@ export async function generateItinerary(trip) {
  * the replacement.
  */
 function replaceInvalidStops(stops, candidates, usedSpotIds) {
+  // Gemini's prompt asks it not to repeat places, but nothing downstream
+  // ever enforced that — unlike the heuristic path (which seats spots
+  // into a Set and can never double-book one), the AI path just trusted
+  // the model's compliance. Two failure modes both show up as "repeated
+  // places": Gemini itself naming the same attraction (or restaurant)
+  // twice, and findMatchingSpot's fuzzy substring/word-overlap matching
+  // resolving two differently-worded Gemini place names to the very same
+  // candidate spot. Accommodation is the one deliberate exception — a
+  // hotel legitimately repeats across check-in/day-start/return/check-out
+  // — so every other stop, including food_dining (a restaurant/café
+  // shouldn't be reused for two different meals either), is deduplicated
+  // here across the *whole* trip, not just within a single day.
+  const seenIds = new Set();
   for (let i = 0; i < stops.length; i++) {
     const stop = stops[i];
-    if (isValidItineraryStop(stop)) continue;
+    const isDuplicate = stop.category !== 'accommodation'
+      && stop.spot_id
+      && seenIds.has(stop.spot_id);
+    if (isValidItineraryStop(stop) && !isDuplicate) {
+      if (stop.category !== 'accommodation' && stop.spot_id) {
+        seenIds.add(stop.spot_id);
+      }
+      continue;
+    }
 
     const sameCategoryReplacement = candidates.find(
       (c) => c.category === stop.category && !usedSpotIds.has(c.id) && isValidItineraryStop(c)
@@ -505,7 +669,8 @@ function replaceInvalidStops(stops, candidates, usedSpotIds) {
       || candidates.find((c) => !usedSpotIds.has(c.id) && isValidItineraryStop(c));
 
     if (!anyReplacement) {
-      // Nothing left to swap in — drop the invalid stop rather than show it.
+      // Nothing left to swap in — drop the invalid/duplicate stop rather
+      // than show it twice.
       usedSpotIds.delete(stop.spot_id);
       stops.splice(i, 1);
       i -= 1;
@@ -527,6 +692,9 @@ function replaceInvalidStops(stops, candidates, usedSpotIds) {
       reasoning: stop.reasoning,
       to_location_name: anyReplacement.name,
     };
+    if (anyReplacement.category !== 'accommodation') {
+      seenIds.add(anyReplacement.id);
+    }
   }
 }
 
@@ -588,14 +756,107 @@ function chunkIntoDays(orderedStops, dayCount) {
   if (orderedStops.length === 0) return buckets;
 
   const perDay = Math.ceil(orderedStops.length / count);
-  for (let i = 0; i < orderedStops.length; i++) {
-    const bucketIdx = Math.min(count - 1, Math.floor(i / perDay));
-    buckets[bucketIdx].push(orderedStops[i]);
+
+  // Category-balanced bucket assignment (Part 9 fix): a naive positional
+  // slice of the nearest-neighbor route ("first `perDay` stops -> Day 1,
+  // next `perDay` -> Day 2, ...") can dump an entire same-category run
+  // into one day — nearest-neighbor ordering visits nearby same-type
+  // spots (5 restaurants, 2 malls) back-to-back because they're
+  // geographically clustered, so a plain slice grabs that whole run
+  // intact. The later diversifyConsecutive pass only reorders *within* a
+  // day and can't fix a day that's already 5-of-7 stops from one
+  // category — there's nothing different to swap it with locally.
+  //
+  // Instead, walk the route in its existing (already route-optimized)
+  // order, but assign each stop to whichever day — among days not yet at
+  // `perDay` capacity — currently holds the fewest stops of that same
+  // category. This spreads a same-category run evenly across the trip's
+  // days instead of stacking it into one, while still broadly respecting
+  // the route order (ties go to the earliest day), so day-level
+  // geographic coherence isn't badly disrupted.
+  const categoryCountsByDay = buckets.map(() => new Map());
+  for (const stop of orderedStops) {
+    const category = stop.spot.category;
+    let bestDay = -1;
+    let bestCount = Infinity;
+    for (let d = 0; d < count; d++) {
+      if (buckets[d].length >= perDay) continue;
+      const c = categoryCountsByDay[d].get(category) || 0;
+      if (c < bestCount) {
+        bestCount = c;
+        bestDay = d;
+      }
+    }
+    if (bestDay === -1) {
+      // Rounding edge case — every day already hit `perDay`. Fall back to
+      // whichever day has the fewest stops overall.
+      bestDay = buckets.reduce((minIdx, b, idx) => (b.length < buckets[minIdx].length ? idx : minIdx), 0);
+    }
+    buckets[bestDay].push(stop);
+    categoryCountsByDay[bestDay].set(category, (categoryCountsByDay[bestDay].get(category) || 0) + 1);
   }
   return buckets;
 }
 
-// Part 8 — Time Awareness: which part of the day a category/subcategory
+/**
+ * Rebalances WHICH DAY each stop belongs to so no single day ends up
+ * dominated by one category — used on the Gemini/AI path, where day
+ * assignment comes straight from the model's own output. Gemini can (and
+ * does) put a whole same-category run — 5 restaurants, 2 malls — onto one
+ * day, and no amount of *reordering within* that day can fix it if
+ * there's nothing else in that day to swap with. This walks the stops in
+ * their existing order and reassigns each one to whichever day — among
+ * days not yet back at their original stop count — currently holds the
+ * fewest stops of that same category, so a same-category run gets spread
+ * across the trip instead of stacked into a single day.
+ *
+ * Accommodation stops (legitimately repeat check-in/day-start/etc.) and
+ * any stop without a valid `day` are left untouched. Each day's *total*
+ * stop count is preserved — only which stops land where changes — so
+ * trip length/structure isn't disturbed.
+ */
+function rebalanceCategoriesAcrossDays(stops) {
+  const movable = stops.filter((s) => s.category !== 'accommodation' && Number.isFinite(s.day));
+  const days = [...new Set(movable.map((s) => s.day))].sort((a, b) => a - b);
+  if (days.length < 2) return stops; // nothing to balance across
+
+  const dayCapacity = new Map();
+  const dayDate = new Map();
+  for (const d of days) {
+    dayCapacity.set(d, movable.filter((s) => s.day === d).length);
+    dayDate.set(d, movable.find((s) => s.day === d)?.date || null);
+  }
+
+  const dayUsed = new Map(days.map((d) => [d, 0]));
+  const dayCategoryCounts = new Map(days.map((d) => [d, new Map()]));
+  const newDayFor = new Map();
+
+  for (const stop of movable) {
+    let bestDay = null;
+    let bestCount = Infinity;
+    for (const d of days) {
+      if (dayUsed.get(d) >= dayCapacity.get(d)) continue;
+      const c = dayCategoryCounts.get(d).get(stop.category) || 0;
+      if (c < bestCount) {
+        bestCount = c;
+        bestDay = d;
+      }
+    }
+    if (bestDay == null) bestDay = stop.day; // shouldn't happen — capacities sum to movable.length
+    newDayFor.set(stop, bestDay);
+    dayUsed.set(bestDay, dayUsed.get(bestDay) + 1);
+    const catMap = dayCategoryCounts.get(bestDay);
+    catMap.set(stop.category, (catMap.get(stop.category) || 0) + 1);
+  }
+
+  return stops.map((s) => {
+    const newDay = newDayFor.get(s);
+    if (newDay == null || newDay === s.day) return s;
+    return { ...s, day: newDay, date: dayDate.get(newDay) || s.date };
+  });
+}
+
+
 // naturally belongs to. Matched against category first (cheap, reliable),
 // then subcategory/name keywords for the cross-cutting cases (a "sunset
 // point" is nature/heritage by category but unmistakably an evening spot).
@@ -603,13 +864,13 @@ function chunkIntoDays(orderedStops, dayCount) {
 // geographic ordering already put it.
 const TIME_SLOT_RANK = { morning: 0, any: 1, afternoon: 2, evening: 3 };
 
-const MORNING_CATEGORIES = new Set(['heritage', 'nature']);
+const MORNING_CATEGORIES = new Set(['heritage_historical', 'nature_scenic', 'religious_spiritual']);
 const MORNING_KEYWORDS = ['temple', 'garden', 'beach', 'sunrise', 'park', 'lake'];
 
-const AFTERNOON_CATEGORIES = new Set(['shopping']);
+const AFTERNOON_CATEGORIES = new Set(['shopping', 'arts_culture', 'science_learning']);
 const AFTERNOON_KEYWORDS = ['museum', 'gallery', 'aquarium', 'indoor', 'planetarium', 'mall'];
 
-const EVENING_CATEGORIES = new Set(['nightlife']);
+const EVENING_CATEGORIES = new Set(['nightlife', 'entertainment_recreation']);
 const EVENING_KEYWORDS = ['marina', 'sunset', 'promenade', 'boardwalk', 'night market', 'viewpoint', 'entertainment'];
 
 /** Which part of the day a spot is most naturally visited in — see Part 8. */
@@ -911,7 +1172,12 @@ export async function regenerateStop(trip, itinerary, stopOrder) {
   if (idx === -1) throw new Error('Stop not found in this itinerary.');
   const current = stops[idx];
 
-  const { spots: candidates } = await loadSpots({ city: trip.destination });
+  const { spots: candidates } = await loadSpots({
+    city: trip.destination,
+    lat: trip.destination_lat,
+    lng: trip.destination_lng,
+    interests: trip.interests || [],
+  });
   const usedIds = new Set(stops.map((s) => s.spot_id));
 
   const anchor = { lat: current.latitude ?? trip.destination_lat, lng: current.longitude ?? trip.destination_lng };
@@ -928,18 +1194,11 @@ export async function regenerateStop(trip, itinerary, stopOrder) {
   });
   const reasoning = await explainSpotChoice(replacement, { interestLabels });
 
-  let mealSuggestion = current.meal_suggestion || null;
-  if (!['food', 'stay'].includes(replacement.category)) {
-    const nearby = nearestInCategory(candidates, 'food', { lat: replacement.latitude, lng: replacement.longitude }, {
-      maxRadiusKm: 3, exclude: usedIds,
-    });
-    if (nearby) {
-      mealSuggestion = {
-        name: nearby.spot.name, distance_km: nearby.distanceKm, rating: nearby.spot.rating ?? null,
-        avg_cost_inr: nearby.spot.entry_fee_inr || null, description: nearby.spot.description || null,
-      };
-    }
-  }
+  // "Nearby food recommendation" on non-food attraction stops was removed
+  // itinerary-wide (see the same comment in the main generation loop
+  // above) — food suggestions now come only from the dedicated meal-time
+  // stops, so a regenerated attraction stop shouldn't reintroduce one.
+  const mealSuggestion = null;
 
   const isWeekend = [0, 6].includes(new Date(trip.start_date).getDay());
   const groupSize = trip.adults + trip.kids + trip.elderly + trip.specially_abled;
@@ -1058,9 +1317,9 @@ async function tryFullAiItinerary(trip, candidates, forecast, learnedPreferences
     // prompt alone to skip them.
     const wantsShopping = (trip.interests || []).some((i) => i.category === 'shopping');
     const attractionsDataset = candidates
-      .filter((s) => s.category !== 'stay' && s.category !== 'food' && (wantsShopping || s.category !== 'shopping'))
+      .filter((s) => s.category !== 'stay' && s.category !== 'food_dining' && (wantsShopping || s.category !== 'shopping'))
       .map(toDatasetRow);
-    const restaurantsDataset = candidates.filter((s) => s.category === 'food').map(toDatasetRow);
+    const restaurantsDataset = candidates.filter((s) => s.category === 'food_dining').map(toDatasetRow);
     const hotelsDataset = candidates.filter((s) => s.category === 'stay').map(toDatasetRow);
 
     const parsed = await generateFullItinerary(trip, {
@@ -1072,6 +1331,12 @@ async function tryFullAiItinerary(trip, candidates, forecast, learnedPreferences
       weather: forecast,
     });
     if (!parsed) return null;
+    // An empty itinerary array means Gemini couldn't find anything worth
+    // recommending for the traveler's exact interest selection — rather
+    // than surfacing a blank trip, fall through to the heuristic path
+    // below, which has its own fallback to the destination's most famous
+    // attractions when interests don't match anything nearby.
+    if (!Array.isArray(parsed.itinerary) || parsed.itinerary.length === 0) return null;
 
     const usedIds = new Set(
       parsed.itinerary.map((item) => findMatchingSpot(candidates, item.place)?.id).filter(Boolean)
@@ -1085,6 +1350,7 @@ async function tryFullAiItinerary(trip, candidates, forecast, learnedPreferences
         spot_id: matched?.id || `ai-${i + 1}`,
         name: item.place || matched?.name || `Stop ${i + 1}`,
         category,
+        subcategory: matched?.subcategory || null,
         latitude: matched?.latitude ?? null,
         longitude: matched?.longitude ?? null,
         order: i + 1,
@@ -1116,19 +1382,43 @@ async function tryFullAiItinerary(trip, candidates, forecast, learnedPreferences
     });
 
     // Safety net for Part 9: the prompt already asks Gemini to avoid
-    // back-to-back same-type stops, but re-check and locally reshuffle
-    // within each day in case it didn't fully comply — day groupings and
-    // dates from Gemini are preserved, only the order within a day shifts.
-    const dayGroups = new Map();
-    for (const s of stops) {
-      const key = s.day ?? 1;
-      if (!dayGroups.has(key)) dayGroups.set(key, []);
-      dayGroups.get(key).push(s);
-    }
-    stops = [...dayGroups.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .flatMap(([, dayStops]) => diversifyConsecutive(dayStops, (s) => s.category))
+    // back-to-back same-type stops, but re-check and fix it in two steps.
+    // Step 1 rebalances WHICH DAY each stop lands on — Gemini's own day
+    // assignment can concentrate a whole same-category run (5 restaurants,
+    // 2 malls) onto a single day, and no amount of reordering *within*
+    // that day can fix it if there's nothing else in that day to swap
+    // with. Step 2 then reorders within each (now-balanced) day so same-
+    // category/subcategory stops aren't adjacent either.
+    stops = rebalanceCategoriesAcrossDays(stops);
+
+    const groupByDay = (list) => {
+      const groups = new Map();
+      for (const s of list) {
+        const key = s.day ?? 1;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(s);
+      }
+      return [...groups.entries()].sort((a, b) => a[0] - b[0]);
+    };
+
+    stops = groupByDay(stops).flatMap(([, dayStops]) => diversifyConsecutive(dayStops, (s) => s.category));
+    // Re-group after the category pass so the finer subcategory pass also
+    // only compares stops within the same day.
+    stops = groupByDay(stops)
+      .flatMap(([, dayStops]) => diversifyConsecutive(dayStops, (s) => s.subcategory || s.category))
       .map((s, i) => ({ ...s, order: i + 1 }));
+
+    // Safety net (Part 9 follow-up): diversifyConsecutive above only
+    // reorders stops that already differ from their neighbors — it can't
+    // fix a trip that's uniformly one category throughout. Re-apply the
+    // same per-category cap the heuristic path enforces at selection time,
+    // swapping any overflow stop for a genuine unused candidate from one
+    // of the traveler's other requested categories.
+    const requestedCategoriesForCap = (trip.interests || []).map((i) => i.category).filter(Boolean);
+    stops = capStopsByCategory(stops, candidates, requestedCategoriesForCap, {
+      anchor: { lat: trip.destination_lat, lng: trip.destination_lng },
+    });
+
 
     // Gemini estimates travel time in its own text but doesn't compute real
     // leg distances — fill those in from the actual routing service for any
@@ -1256,6 +1546,7 @@ async function tryFullAiItinerary(trip, candidates, forecast, learnedPreferences
     budgetSummary.budget_validation = geminiBudgetValidation;
     budgetSummary.ai_extras.final_validation = runFinalValidation({
       stops, candidates, hiddenGems, budgetValidation: geminiBudgetValidation, tripStartHour: trip.start_time ? parseInt(trip.start_time.split(':')[0], 10) : 9,
+      requestedCategories: [...new Set((trip.interests || []).map((i) => i.category).filter(Boolean))],
     });
 
     applyAccommodationToBudget(budgetSummary, { accommodation, nights, groupSize: geminiGroupSize });
@@ -1288,12 +1579,56 @@ function toDatasetRow(s) {
   };
 }
 
+/** Lowercases, strips punctuation, and collapses whitespace for fuzzy name matching. */
+function normalizeSpotName(str) {
+  return (str || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Matches a place name Gemini returned back to a real candidate spot from
+ * the dataset it was given. Gemini occasionally reformats a name slightly
+ * (extra "Chennai" suffix, different punctuation/casing, a shortened or
+ * lightly reworded name) — the original exact/substring match was too
+ * strict for that and silently returned null, leaving the stop without
+ * coordinates (invisible on the map) even though a genuine match existed.
+ * This tries, in order: exact normalized match, substring either
+ * direction, then significant-word overlap as a last resort.
+ */
 function findMatchingSpot(candidates, placeName) {
   if (!placeName) return null;
-  const needle = placeName.trim().toLowerCase();
-  return candidates.find((s) => s.name.trim().toLowerCase() === needle)
-    || candidates.find((s) => s.name.toLowerCase().includes(needle) || needle.includes(s.name.toLowerCase()))
-    || null;
+  const needle = normalizeSpotName(placeName);
+  if (!needle) return null;
+
+  const exact = candidates.find((s) => normalizeSpotName(s.name) === needle);
+  if (exact) return exact;
+
+  const substring = candidates.find((s) => {
+    const n = normalizeSpotName(s.name);
+    return n.length > 0 && (n.includes(needle) || needle.includes(n));
+  });
+  if (substring) return substring;
+
+  const needleWords = new Set(needle.split(' ').filter((w) => w.length > 2));
+  if (needleWords.size === 0) return null;
+
+  let best = null;
+  let bestRatio = 0;
+  for (const s of candidates) {
+    const candWords = new Set(normalizeSpotName(s.name).split(' ').filter((w) => w.length > 2));
+    if (candWords.size === 0) continue;
+    let overlap = 0;
+    for (const w of needleWords) if (candWords.has(w)) overlap += 1;
+    const ratio = overlap / Math.min(needleWords.size, candWords.size);
+    if (ratio > bestRatio) {
+      bestRatio = ratio;
+      best = s;
+    }
+  }
+  return bestRatio >= 0.6 ? best : null;
 }
 
 function normalizeCrowdLevel(level) {

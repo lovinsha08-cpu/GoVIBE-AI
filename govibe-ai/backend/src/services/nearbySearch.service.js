@@ -23,9 +23,9 @@ const GOOGLE_NEARBY_URL = 'https://maps.googleapis.com/maps/api/place/nearbysear
 // Maps free-text "near me" phrasing to { govibeCategory, osmTags, googleType }
 // so one search term drives all three sources consistently.
 const CATEGORY_MAP = [
-  { match: /juice|smoothie/, govibe: 'food', osm: ['shop=juice', 'shop=beverages'], google: 'cafe', label: 'juice shop' },
-  { match: /restaurant|dinner|lunch|food(?!.*truck)/, govibe: 'food', osm: ['amenity=restaurant'], google: 'restaurant', label: 'restaurant' },
-  { match: /cafe|coffee/, govibe: 'food', osm: ['amenity=cafe'], google: 'cafe', label: 'cafe' },
+  { match: /juice|smoothie/, govibe: 'food_dining', osm: ['shop=juice', 'shop=beverages'], google: 'cafe', label: 'juice shop' },
+  { match: /restaurant|dinner|lunch|food(?!.*truck)/, govibe: 'food_dining', osm: ['amenity=restaurant'], google: 'restaurant', label: 'restaurant' },
+  { match: /cafe|coffee/, govibe: 'food_dining', osm: ['amenity=cafe'], google: 'cafe', label: 'cafe' },
   { match: /hotel|stay|homestay|lodging/, govibe: 'stay', osm: ['tourism=hotel', 'tourism=guest_house'], google: 'lodging', label: 'hotel' },
   { match: /atm|cash/, govibe: null, osm: ['amenity=atm'], google: 'atm', label: 'ATM' },
   { match: /hospital|clinic|doctor|medical/, govibe: null, osm: ['amenity=hospital', 'amenity=clinic'], google: 'hospital', label: 'hospital' },

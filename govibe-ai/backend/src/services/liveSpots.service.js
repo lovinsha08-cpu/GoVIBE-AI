@@ -6,56 +6,74 @@ import { supabaseAdmin } from '../config/supabase.js';
 
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
 const USER_AGENT = 'GoVIBE-AI/1.0 (trip planning app)';
-const REQUEST_TIMEOUT_MS = 12000;
-const TAG_DELAY_MS = 1000;
+// A single combined query (see buildCombinedOverpassQuery below) does more
+// work per request than the old one-tag-at-a-time calls did, so it gets a
+// longer timeout — but this is still one request instead of 27, so it's
+// far faster overall even with the larger ceiling.
+const REQUEST_TIMEOUT_MS = 25000;
 
 // Tourism-focused tags only — deliberately avoids generic "office=*",
 // "amenity=townhall", "amenity=police", etc. so administrative/civic
 // buildings never enter the candidate pool in the first place. The
 // attractionFilter service double-checks by name as a second layer.
 const OSM_QUERIES = [
-  // Culture & Heritage
-  { osm: 'tourism=attraction', category: 'heritage', subcategory: 'Monuments' },
-  { osm: 'tourism=museum', category: 'heritage', subcategory: 'Museums' },
-  { osm: 'tourism=gallery', category: 'heritage', subcategory: 'Art Galleries' },
-  { osm: 'historic=castle', category: 'heritage', subcategory: 'Forts & Palaces' },
-  { osm: 'historic=fort', category: 'heritage', subcategory: 'Forts & Palaces' },
-  { osm: 'historic=palace', category: 'heritage', subcategory: 'Forts & Palaces' },
-  { osm: 'historic=monument', category: 'heritage', subcategory: 'Monuments' },
-  { osm: 'historic=memorial', category: 'heritage', subcategory: 'Monuments' },
-  { osm: 'historic=ruins', category: 'heritage', subcategory: 'Heritage Walks' },
-  { osm: 'amenity=place_of_worship', category: 'heritage', subcategory: 'Temples' },
-  // Nature & Outdoors
-  { osm: 'tourism=viewpoint', category: 'nature', subcategory: 'Hills & Viewpoints' },
-  { osm: 'natural=beach', category: 'nature', subcategory: 'Beaches' },
-  { osm: 'natural=waterfall', category: 'nature', subcategory: 'Waterfalls' },
-  { osm: 'natural=water', category: 'nature', subcategory: 'Lakes & Rivers' },
-  { osm: 'leisure=nature_reserve', category: 'nature', subcategory: 'Wildlife Sanctuaries' },
-  { osm: 'leisure=garden', category: 'nature', subcategory: 'Botanical Gardens' },
-  { osm: 'leisure=park', category: 'relaxation', subcategory: 'Picnic Spots' },
-  // Adventure & family
-  { osm: 'tourism=theme_park', category: 'family', subcategory: 'Theme Parks' },
-  { osm: 'tourism=zoo', category: 'family', subcategory: 'Zoos' },
-  { osm: 'tourism=aquarium', category: 'family', subcategory: 'Aquariums' },
-  { osm: 'leisure=water_park', category: 'adventure', subcategory: 'Water Sports' },
+  // Heritage & Historical
+  { osm: 'tourism=attraction', category: 'heritage_historical', subcategory: 'Monuments' },
+  { osm: 'tourism=museum', category: 'heritage_historical', subcategory: 'Museums' },
+  { osm: 'tourism=gallery', category: 'arts_culture', subcategory: 'Art Galleries' },
+  { osm: 'historic=castle', category: 'heritage_historical', subcategory: 'Forts' },
+  { osm: 'historic=fort', category: 'heritage_historical', subcategory: 'Forts' },
+  { osm: 'historic=palace', category: 'heritage_historical', subcategory: 'Heritage Buildings' },
+  { osm: 'historic=monument', category: 'heritage_historical', subcategory: 'Monuments' },
+  { osm: 'historic=memorial', category: 'heritage_historical', subcategory: 'Memorials' },
+  { osm: 'historic=ruins', category: 'heritage_historical', subcategory: 'Archaeological Sites' },
+  { osm: 'amenity=place_of_worship', category: 'religious_spiritual', subcategory: 'Temples' },
+  // Nature & Scenic
+  { osm: 'tourism=viewpoint', category: 'photography_landmarks', subcategory: 'Viewpoints' },
+  { osm: 'natural=beach', category: 'nature_scenic', subcategory: 'Beaches' },
+  { osm: 'natural=waterfall', category: 'nature_scenic', subcategory: 'Rivers & Backwaters' },
+  { osm: 'natural=water', category: 'nature_scenic', subcategory: 'Lakes' },
+  { osm: 'leisure=nature_reserve', category: 'nature_scenic', subcategory: 'Eco Parks' },
+  { osm: 'leisure=garden', category: 'nature_scenic', subcategory: 'Gardens' },
+  { osm: 'leisure=park', category: 'nature_scenic', subcategory: 'Parks' },
+  // Wildlife & Entertainment
+  { osm: 'tourism=theme_park', category: 'entertainment_recreation', subcategory: 'Theme Parks' },
+  { osm: 'tourism=zoo', category: 'wildlife', subcategory: 'Zoos' },
+  { osm: 'tourism=aquarium', category: 'wildlife', subcategory: 'Aquariums' },
+  { osm: 'leisure=water_park', category: 'entertainment_recreation', subcategory: 'Water Parks' },
   // Stay
-  { osm: 'tourism=hotel', category: 'stay', subcategory: 'Resorts' },
-  { osm: 'tourism=guest_house', category: 'stay', subcategory: 'Homestay' },
+  { osm: 'tourism=hotel', category: 'stay', subcategory: 'Hotels' },
+  { osm: 'tourism=guest_house', category: 'stay', subcategory: 'Hotels' },
   // Food & Dining
-  { osm: 'amenity=restaurant', category: 'food', subcategory: 'Local Cuisine' },
-  { osm: 'amenity=cafe', category: 'food', subcategory: 'Cafés' },
+  { osm: 'amenity=restaurant', category: 'food_dining', subcategory: 'Restaurants' },
+  { osm: 'amenity=cafe', category: 'food_dining', subcategory: 'Cafés' },
   // Shopping
   { osm: 'shop=mall', category: 'shopping', subcategory: 'Shopping Malls' },
-  { osm: 'amenity=marketplace', category: 'shopping', subcategory: 'Local Markets' },
+  { osm: 'amenity=marketplace', category: 'shopping', subcategory: 'Street Markets' },
 ];
 
-async function fetchOverpassTag(lat, lng, radiusMeters, tag) {
-  const [key, value] = tag.split('=');
-  const query = `
-    [out:json][timeout:25];
-    nwr["${key}"="${value}"](around:${radiusMeters},${lat},${lng});
+// Builds ONE combined Overpass QL query covering every tag in OSM_QUERIES,
+// instead of 27 separate HTTP requests each with a 1s throttling delay
+// between them (~30+ seconds minimum just from the delays, before network
+// time). Overpass supports a union block `(...)` of multiple filters in a
+// single request — this is the standard, documented way to batch tag
+// lookups and is a single round-trip instead of 27.
+function buildCombinedOverpassQuery(lat, lng, radiusMeters, tags) {
+  const clauses = tags.map((tag) => {
+    const [key, value] = tag.split('=');
+    return `nwr["${key}"="${value}"](around:${radiusMeters},${lat},${lng});`;
+  }).join('\n    ');
+  return `
+    [out:json][timeout:50];
+    (
+    ${clauses}
+    );
     out center 40;
   `;
+}
+
+async function fetchOverpassCombined(lat, lng, radiusMeters, tags) {
+  const query = buildCombinedOverpassQuery(lat, lng, radiusMeters, tags);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -74,6 +92,18 @@ async function fetchOverpassTag(lat, lng, radiusMeters, tag) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// A combined query has no per-element tag label to say which OSM_QUERIES
+// entry matched it, so this rebuilds that mapping from the element's own
+// tags (key=value) instead.
+function classifyElement(el) {
+  const tags = el.tags || {};
+  for (const q of OSM_QUERIES) {
+    const [key, value] = q.osm.split('=');
+    if (tags[key] === value) return q;
+  }
+  return null;
 }
 
 const RELIGION_SUBCATEGORY = { hindu: 'Temples', buddhist: 'Temples', jain: 'Temples', christian: 'Churches', muslim: 'Mosques', sikh: 'Temples' };
@@ -112,20 +142,21 @@ function toSpotRow(el, { category, subcategory }, city) {
 export async function fetchLiveSpots({ lat, lng, city, radiusMeters = 15000 }) {
   if (lat == null || lng == null) return [];
 
-  const rows = [];
-  for (const q of OSM_QUERIES) {
-    try {
-      const elements = await fetchOverpassTag(lat, lng, radiusMeters, q.osm);
-      for (const el of elements) {
-        const row = toSpotRow(el, q, city);
-        if (row) rows.push(row);
-      }
-    } catch (err) {
-      console.warn(`[liveSpots] Skipped ${q.osm} for "${city}":`, err.message);
+  try {
+    const tags = OSM_QUERIES.map((q) => q.osm);
+    const elements = await fetchOverpassCombined(lat, lng, radiusMeters, tags);
+    const rows = [];
+    for (const el of elements) {
+      const q = classifyElement(el);
+      if (!q) continue;
+      const row = toSpotRow(el, q, city);
+      if (row) rows.push(row);
     }
-    await new Promise((resolve) => setTimeout(resolve, TAG_DELAY_MS));
+    return rows;
+  } catch (err) {
+    console.warn(`[liveSpots] Combined Overpass query failed for "${city}":`, err.message);
+    return [];
   }
-  return rows;
 }
 
 export async function cacheSpots(rows) {

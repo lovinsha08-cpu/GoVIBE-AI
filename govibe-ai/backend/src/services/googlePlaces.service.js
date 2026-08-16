@@ -6,21 +6,34 @@ const REQUEST_TIMEOUT_MS = 10000;
 const TYPE_DELAY_MS = 200;
 
 const PLACE_TYPE_QUERIES = [
-  { type: 'tourist_attraction', category: 'heritage', subcategory: 'Monuments' },
-  { type: 'museum', category: 'heritage', subcategory: 'Museums' },
-  { type: 'art_gallery', category: 'heritage', subcategory: 'Art Galleries' },
-  { type: 'hindu_temple', category: 'heritage', subcategory: 'Temples' },
-  { type: 'church', category: 'heritage', subcategory: 'Churches' },
-  { type: 'mosque', category: 'heritage', subcategory: 'Mosques' },
-  { type: 'park', category: 'relaxation', subcategory: 'Picnic Spots' },
-  { type: 'natural_feature', category: 'nature', subcategory: 'Hills & Viewpoints' },
-  { type: 'zoo', category: 'family', subcategory: 'Zoos' },
-  { type: 'aquarium', category: 'family', subcategory: 'Aquariums' },
-  { type: 'amusement_park', category: 'family', subcategory: 'Theme Parks' },
-  { type: 'lodging', category: 'stay', subcategory: 'Resorts' },
-  { type: 'restaurant', category: 'food', subcategory: 'Local Cuisine' },
-  { type: 'cafe', category: 'food', subcategory: 'Cafés' },
+  { type: 'tourist_attraction', category: 'heritage_historical', subcategory: 'Monuments' },
+  { type: 'museum', category: 'heritage_historical', subcategory: 'Museums' },
+  { type: 'art_gallery', category: 'arts_culture', subcategory: 'Art Galleries' },
+  { type: 'hindu_temple', category: 'religious_spiritual', subcategory: 'Temples' },
+  { type: 'church', category: 'religious_spiritual', subcategory: 'Churches' },
+  { type: 'mosque', category: 'religious_spiritual', subcategory: 'Mosques' },
+  { type: 'park', category: 'nature_scenic', subcategory: 'Parks' },
+  // 'natural_feature' was removed from the Places API's nearby-search type
+  // list years ago — that query silently returned zero/error results on
+  // every call, starving nature_scenic candidates near any destination and
+  // making it easy for a category like shopping (reliably deep/well-rated
+  // in most cities) to dominate the pool once other interests came back
+  // thin. Beaches/lakes/hills aren't a Nearby Search "type" Google
+  // supports directly, so these are fetched via Text Search instead — see
+  // NATURE_TEXT_QUERIES + fetchNatureTextResults below.
+  { type: 'zoo', category: 'wildlife', subcategory: 'Zoos' },
+  { type: 'aquarium', category: 'wildlife', subcategory: 'Aquariums' },
+  { type: 'amusement_park', category: 'entertainment_recreation', subcategory: 'Theme Parks' },
+  { type: 'lodging', category: 'stay', subcategory: 'Hotels' },
+  { type: 'restaurant', category: 'food_dining', subcategory: 'Restaurants' },
+  { type: 'cafe', category: 'food_dining', subcategory: 'Cafés' },
   { type: 'shopping_mall', category: 'shopping', subcategory: 'Shopping Malls' },
+  { type: 'stadium', category: 'sports_adventure', subcategory: 'Stadiums' },
+  { type: 'spa', category: 'wellness_leisure', subcategory: 'Spas' },
+  { type: 'night_club', category: 'nightlife', subcategory: 'Bars' },
+  { type: 'bar', category: 'nightlife', subcategory: 'Bars' },
+  { type: 'library', category: 'science_learning', subcategory: 'Libraries' },
+  { type: 'movie_theater', category: 'arts_culture', subcategory: 'Theatres' },
 ];
 
 // Never trust a Google "type" bucket alone — a result can carry several
@@ -35,7 +48,34 @@ const EXCLUDED_GOOGLE_TYPES = new Set([
   'light_rail_station',
 ]);
 
+// Text Search substitute for the dead 'natural_feature' nearby-search type
+// (see PLACE_TYPE_QUERIES comment above) — Google has no single "type" for
+// beaches/lakes/hills, but a plain keyword search near a point works fine.
+const NATURE_TEXT_QUERIES = [
+  { query: 'beach', subcategory: 'Beaches' },
+  { query: 'lake', subcategory: 'Lakes' },
+  { query: 'scenic viewpoint', subcategory: 'Scenic Viewpoints' },
+  { query: 'garden', subcategory: 'Gardens' },
+];
+
 export const isGooglePlacesConfigured = Boolean(env.googlePlacesApiKey);
+
+async function fetchNatureTextResults(lat, lng, radiusMeters, query) {
+  const url = `${TEXT_SEARCH_URL}?query=${encodeURIComponent(query)}&location=${lat},${lng}&radius=${radiusMeters}&key=${env.googlePlacesApiKey}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`Google Places responded ${res.status}`);
+    const data = await res.json();
+    if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+      throw new Error(`Google Places status: ${data.status}${data.error_message ? ` — ${data.error_message}` : ''}`);
+    }
+    return data.results || [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function fetchNearbyByType(lat, lng, radiusMeters, type) {
   const url = `${NEARBY_SEARCH_URL}?location=${lat},${lng}&radius=${radiusMeters}&type=${type}&key=${env.googlePlacesApiKey}`;
@@ -246,5 +286,25 @@ export async function fetchGooglePlacesSpots({ lat, lng, city, radiusMeters = 15
     }
     await new Promise((resolve) => setTimeout(resolve, TYPE_DELAY_MS));
   }
+
+  // Nature/scenic spots the typed nearby-search loop above can't reach
+  // (see the NATURE_TEXT_QUERIES comment) — fetched via Text Search and
+  // merged into the same deduped pool so they compete fairly for route
+  // slots instead of nature_scenic quietly staying empty.
+  for (const nq of NATURE_TEXT_QUERIES) {
+    try {
+      const places = await fetchNatureTextResults(lat, lng, radiusMeters, `${nq.query} in ${city || ''}`.trim());
+      for (const place of places) {
+        if (seen.has(place.place_id)) continue;
+        seen.add(place.place_id);
+        const row = toSpotRow(place, { category: 'nature_scenic', subcategory: nq.subcategory }, city);
+        if (row) rows.push(row);
+      }
+    } catch (err) {
+      console.warn(`[googlePlaces] Skipped nature text query "${nq.query}" for "${city}":`, err.message);
+    }
+    await new Promise((resolve) => setTimeout(resolve, TYPE_DELAY_MS));
+  }
+
   return rows;
 }

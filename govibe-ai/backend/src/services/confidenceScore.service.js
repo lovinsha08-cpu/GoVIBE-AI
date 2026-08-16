@@ -60,7 +60,7 @@ function scoreRouteEfficiency(stops) {
 function scoreWeatherSuitability(forecast, outdoorSwaps, stops) {
   if (!forecast) return 70; // unknown, not bad
   if (!forecast.outdoorUnfriendly) return 95;
-  const remainingOutdoorStops = stops.filter((s) => ['nature', 'adventure'].includes(s.category)).length;
+  const remainingOutdoorStops = stops.filter((s) => ['nature_scenic', 'sports_adventure', 'wildlife', 'photography_landmarks'].includes(s.category)).length;
   if (remainingOutdoorStops === 0) return 100; // fully adapted to the forecast
   return Math.round(Math.min(95, 55 + outdoorSwaps * 12));
 }

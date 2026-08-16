@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Loader2, Compass, ArrowLeft, Gem, Star, Ticket, Clock } from 'lucide-react';
 import { api } from '../lib/api';
 import RealMap from '../components/RealMap';
+import { HIDDEN_GEM_CATEGORIES } from '../lib/hiddenGemCategories';
 
 const FILTERS = [
   { key: null, label: 'All' },
@@ -14,16 +15,25 @@ const FILTERS = [
 
 export default function Explore() {
   const navigate = useNavigate();
+  // Lets entry points like the Traveler Dashboard's "Hidden Gems" card
+  // deep-link straight into this filter (/explore?filter=hidden) instead
+  // of landing on "All" and requiring an extra tap.
+  const [searchParams] = useSearchParams();
+  const initialFilter = searchParams.get('filter') === 'hidden' ? 'hidden' : null;
   const [spots, setSpots] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeFilter, setActiveFilter] = useState(null);
+  const [activeFilter, setActiveFilter] = useState(initialFilter);
+  const [hiddenGemCategory, setHiddenGemCategory] = useState(null);
   const [source, setSource] = useState('sample');
+  const isHiddenGems = activeFilter === 'hidden';
 
   useEffect(() => {
     setLoading(true);
     setError('');
-    const params = activeFilter === 'hidden' ? { hiddenGems: true } : { category: activeFilter };
+    const params = isHiddenGems
+      ? { hiddenGems: true, hiddenGemCategory }
+      : { category: activeFilter };
     api.getSpots(params)
       .then((res) => {
         setSpots(res.spots || []);
@@ -31,7 +41,7 @@ export default function Explore() {
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [activeFilter]);
+  }, [activeFilter, hiddenGemCategory]);
 
   return (
     <div className="min-h-screen bg-[#EAF7EF] px-4 sm:px-6 py-8 max-w-2xl mx-auto">
@@ -55,7 +65,10 @@ export default function Explore() {
         {FILTERS.map((f) => (
           <button
             key={f.label}
-            onClick={() => setActiveFilter(f.key)}
+            onClick={() => {
+              setActiveFilter(f.key);
+              if (f.key !== 'hidden') setHiddenGemCategory(null);
+            }}
             className={`text-xs font-medium px-3 py-1.5 rounded-full border transition-colors ${
               activeFilter === f.key
                 ? 'bg-[#0C3B5E] text-white border-[#0C3B5E]'
@@ -66,6 +79,25 @@ export default function Explore() {
           </button>
         ))}
       </div>
+
+      {isHiddenGems && (
+        <div className="flex flex-wrap gap-2 mb-5 -mt-2">
+          {HIDDEN_GEM_CATEGORIES.map((c) => (
+            <button
+              key={c.label}
+              onClick={() => setHiddenGemCategory(c.key)}
+              className={`flex items-center gap-1 text-[11px] font-medium px-2.5 py-1 rounded-full border transition-colors ${
+                hiddenGemCategory === c.key
+                  ? 'bg-[#22C55E] text-white border-[#22C55E]'
+                  : 'bg-white text-[#0C3B5E]/60 border-[#0C3B5E]/10'
+              }`}
+            >
+              {c.key && <Gem size={10} />}
+              {c.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {loading ? (
         <div className="flex justify-center py-16">

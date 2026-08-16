@@ -1,8 +1,31 @@
 import PDFDocument from 'pdfkit';
 import QRCode from 'qrcode';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import { env } from '../config/env.js';
 import { supabaseAdmin } from '../config/supabase.js';
 import { getLiveEmergencyServices } from './emergency.service.js';
+
+// Standard PDF fonts (Helvetica etc.) only support WinAnsi encoding — any
+// place name in Tamil (or another Indic/non-Latin script, which is common
+// for real Chennai spot data pulled from OSM/Google Places) silently
+// renders as garbled glyph soup instead of failing loudly. Noto Sans Tamil
+// (merged with its Latin subset so one font file covers both scripts,
+// see scripts/build-pdf-fonts note below) replaces Helvetica everywhere in
+// this document so every place name — Latin or Tamil — renders correctly.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const FONT_DIR = path.join(__dirname, '..', 'assets', 'fonts');
+const FONT_REGULAR = path.join(FONT_DIR, 'NotoSansTamil-Regular.ttf');
+const FONT_BOLD = path.join(FONT_DIR, 'NotoSansTamil-Bold.ttf');
+
+function registerFonts(doc) {
+  doc.registerFont('Unicode', FONT_REGULAR);
+  doc.registerFont('Unicode-Bold', FONT_BOLD);
+  // No Tamil italic is shipped by Noto Sans Tamil — reuse the regular
+  // weight rather than falling back to Helvetica (which would reintroduce
+  // the garbling for non-Latin names in the few oblique-styled spots).
+  doc.registerFont('Unicode-Oblique', FONT_REGULAR);
+}
 
 /**
  * Renders a complete, branded "Download Itinerary" PDF for a trip.
@@ -33,6 +56,7 @@ const STATIC_MAP_URL = 'https://maps.googleapis.com/maps/api/staticmap';
 
 export async function buildItineraryPdfBuffer({ trip, itinerary }) {
   const doc = new PDFDocument({ size: 'A4', margin: PAGE_MARGIN, bufferPages: true });
+  registerFonts(doc);
   const chunks = [];
   doc.on('data', (chunk) => chunks.push(chunk));
   const done = new Promise((resolve, reject) => {
@@ -83,13 +107,13 @@ function drawCoverSection(doc, trip, itinerary) {
   // at any print resolution.
   doc.save();
   doc.roundedRect(PAGE_MARGIN, PAGE_MARGIN, 34, 34, 8).fill(COLORS.navy);
-  doc.fillColor(COLORS.gold).fontSize(16).font('Helvetica-Bold')
+  doc.fillColor(COLORS.gold).fontSize(16).font('Unicode-Bold')
     .text('G', PAGE_MARGIN, PAGE_MARGIN + 8, { width: 34, align: 'center' });
   doc.restore();
 
-  doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(18)
+  doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(18)
     .text('GoVIBE AI', PAGE_MARGIN + 44, PAGE_MARGIN + 3);
-  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
+  doc.fillColor(COLORS.muted).font('Unicode').fontSize(9)
     .text('Your personalized travel itinerary', PAGE_MARGIN + 44, PAGE_MARGIN + 24);
 
   const generatedOn = new Date().toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -104,10 +128,10 @@ function drawCoverSection(doc, trip, itinerary) {
 
   // ---- Cover content: trip title, destination, dates, travelers, budget ----
   const tripTitle = trip?.destination ? `Trip to ${trip.destination}` : 'Your Trip';
-  doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(28)
+  doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(28)
     .text(tripTitle, PAGE_MARGIN, PAGE_MARGIN + 130, { width: 510, align: 'center' });
 
-  doc.fillColor(COLORS.coral).font('Helvetica-Bold').fontSize(13)
+  doc.fillColor(COLORS.coral).font('Unicode-Bold').fontSize(13)
     .text(trip?.destination || '—', PAGE_MARGIN, doc.y + 6, { width: 510, align: 'center' });
 
   const groupSize = (trip?.adults || 0) + (trip?.kids || 0) + (trip?.elderly || 0) + (trip?.specially_abled || 0);
@@ -128,20 +152,28 @@ function drawCoverSection(doc, trip, itinerary) {
     const x = startX + col * (boxWidth + gap);
     const rowY = y + row * 64;
     doc.roundedRect(x, rowY, boxWidth, 48, 8).fill(COLORS.cream);
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8).text(label.toUpperCase(), x + 14, rowY + 10, { width: boxWidth - 28 });
-    doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(12).text(value, x + 14, rowY + 24, { width: boxWidth - 28 });
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(8).text(label.toUpperCase(), x + 14, rowY + 10, { width: boxWidth - 28 });
+    doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(12).text(value, x + 14, rowY + 24, { width: boxWidth - 28 });
   });
 
   doc.y = y + Math.ceil(coverRows.length / 2) * 64 + 30;
-  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
+  doc.fillColor(COLORS.muted).font('Unicode').fontSize(9)
     .text(`${(itinerary?.stops || []).length} stops planned across your trip`, PAGE_MARGIN, doc.y, { width: 510, align: 'center' });
 }
 
 function sectionTitle(doc, text) {
+  // Earlier sections (key/value grids, the daily timeline) position text
+  // with explicit x/y coordinates, which leaves doc.x sitting wherever
+  // that last positioned call was — not necessarily the page margin. Every
+  // section title must reset it explicitly, or titles drift rightward
+  // (each one inheriting the previous section's last x) the further down
+  // the document you go.
+  doc.x = PAGE_MARGIN;
   doc.moveDown(0.6);
-  doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(13).text(text);
-  doc.moveTo(doc.x, doc.y + 2).lineTo(552, doc.y + 2).lineWidth(0.75).strokeColor('#E5E5EA').stroke();
+  doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(13).text(text, PAGE_MARGIN, doc.y);
+  doc.moveTo(PAGE_MARGIN, doc.y + 2).lineTo(552, doc.y + 2).lineWidth(0.75).strokeColor('#E5E5EA').stroke();
   doc.moveDown(0.5);
+  doc.x = PAGE_MARGIN;
 }
 
 function drawTripSummary(doc, trip, stops, itinerary) {
@@ -176,17 +208,45 @@ function drawTripSummary(doc, trip, stops, itinerary) {
 
 function drawKeyValueGrid(doc, rows) {
   const colWidth = 255;
-  const startX = doc.x;
-  let startY = doc.y;
+  const valueWidth = colWidth - 10;
+  // Always anchor to the page margin rather than doc.x — doc.x reflects
+  // wherever the last positioned text call left it, which drifts after
+  // earlier sections and would otherwise offset this whole grid.
+  const startX = PAGE_MARGIN;
+  const startY = doc.y;
+
+  // Row height used to be a fixed 30pt regardless of content — fine for
+  // short values, but a long value (e.g. a full pickup address like
+  // "Tindivanam - Marakkanam Road, Marakkanam, ... 604303, India") wraps
+  // onto 2-3 lines at this column width and physically ran into the next
+  // row's label/value underneath it. Each *pair* of cells (left + right
+  // column, same row) now gets a height tall enough for whichever of the
+  // two actually wraps the most, so nothing downstream ever overlaps.
+  const pairCount = Math.ceil(rows.length / 2);
+  const rowHeights = [];
+  for (let row = 0; row < pairCount; row++) {
+    let tallest = 30; // sane minimum so short rows keep their original spacing
+    for (const col of [0, 1]) {
+      const entry = rows[row * 2 + col];
+      if (!entry) continue;
+      const valueHeight = doc.font('Unicode-Bold').fontSize(10).heightOfString(String(entry[1]), { width: valueWidth });
+      tallest = Math.max(tallest, 11 + valueHeight + 8);
+    }
+    rowHeights.push(tallest);
+  }
+
+  const rowOffsets = [0];
+  for (const h of rowHeights) rowOffsets.push(rowOffsets[rowOffsets.length - 1] + h);
+
   rows.forEach(([label, value], i) => {
     const col = i % 2;
     const row = Math.floor(i / 2);
     const x = startX + col * colWidth;
-    const y = startY + row * 30;
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8).text(label.toUpperCase(), x, y);
-    doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(10).text(String(value), x, y + 11, { width: colWidth - 10 });
+    const y = startY + rowOffsets[row];
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(8).text(label.toUpperCase(), x, y);
+    doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(10).text(String(value), x, y + 11, { width: valueWidth });
   });
-  doc.y = startY + Math.ceil(rows.length / 2) * 30 + 4;
+  doc.y = startY + rowOffsets[rowOffsets.length - 1] + 4;
 }
 
 function drawAccommodationSection(doc, accommodation, stops) {
@@ -206,7 +266,7 @@ function drawAccommodationSection(doc, accommodation, stops) {
   ensureSpace(doc, 90);
 
   if (!acc) {
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(9)
       .text('No accommodation was requested or found for this trip.');
     doc.moveDown(0.4);
     return;
@@ -228,7 +288,7 @@ function drawDailyTimeline(doc, stops) {
   sectionTitle(doc, 'Day-wise Itinerary');
 
   if (!stops.length) {
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(10).text('No stops available for this itinerary yet.');
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(10).text('No stops available for this itinerary yet.');
     return;
   }
 
@@ -241,22 +301,26 @@ function drawDailyTimeline(doc, stops) {
 
   [...byDay.entries()].sort((a, b) => a[0] - b[0]).forEach(([day, dayStops]) => {
     ensureSpace(doc, 60);
+    // Reset to the page margin — the previous day's stop rows below
+    // position text at PAGE_MARGIN + 60 explicitly, which otherwise
+    // leaks into this heading and pushes "Day 2", "Day 3", etc. inward.
+    doc.x = PAGE_MARGIN;
     const dateLabel = dayStops[0]?.date ? ` · ${dayStops[0].date}` : '';
-    doc.fillColor(COLORS.coral).font('Helvetica-Bold').fontSize(11).text(`Day ${day}${dateLabel}`);
+    doc.fillColor(COLORS.coral).font('Unicode-Bold').fontSize(11).text(`Day ${day}${dateLabel}`, PAGE_MARGIN, doc.y);
     doc.moveDown(0.2);
 
     dayStops.forEach((stop) => {
       ensureSpace(doc, 70);
       const y = doc.y;
 
-      doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(10)
+      doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(10)
         .text(stop.arrival_time || '—', PAGE_MARGIN, y, { width: 55 });
-      doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(10.5)
+      doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(10.5)
         .text(stop.name || 'Stop', PAGE_MARGIN + 60, y, { width: 340 });
 
       let lineY = doc.y + 1;
       if (stop.category) {
-        doc.fillColor(COLORS.muted).font('Helvetica-Oblique').fontSize(8.5)
+        doc.fillColor(COLORS.muted).font('Unicode-Oblique').fontSize(8.5)
           .text(capitalize(stop.category), PAGE_MARGIN + 60, lineY, { width: 340 });
         lineY = doc.y + 1;
       }
@@ -267,7 +331,7 @@ function drawDailyTimeline(doc, stops) {
       if (stop.transport_mode) detailBits.push(`Transport: ${capitalize(stop.transport_mode)}`);
       if (stop.entry_cost_inr != null) detailBits.push(`Entry Fee: ₹${stop.entry_cost_inr}`);
       if (detailBits.length) {
-        doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8.5)
+        doc.fillColor(COLORS.muted).font('Unicode').fontSize(8.5)
           .text(detailBits.join('   ·   '), PAGE_MARGIN + 60, lineY, { width: 340 });
         lineY = doc.y + 1;
       }
@@ -276,24 +340,25 @@ function drawDailyTimeline(doc, stops) {
       // distinct from the entry-fee-only figure above.
       const estimatedStopCost = (stop.entry_cost_inr || 0) + (stop.meal_suggestion?.avg_cost_inr || 0);
       if (estimatedStopCost > 0) {
-        doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8.5)
+        doc.fillColor(COLORS.muted).font('Unicode').fontSize(8.5)
           .text(`Estimated Cost: ₹${estimatedStopCost}`, PAGE_MARGIN + 60, lineY, { width: 340 });
         lineY = doc.y + 1;
       }
 
       if (stop.meal_suggestion?.name) {
-        doc.fillColor(COLORS.teal).font('Helvetica-Bold').fontSize(8.5)
+        doc.fillColor(COLORS.teal).font('Unicode-Bold').fontSize(8.5)
           .text(`Nearby Food Recommendation: ${stop.meal_suggestion.name}`, PAGE_MARGIN + 60, lineY, { width: 340 });
         lineY = doc.y + 1;
       }
 
       if (stop.reasoning || stop.tips) {
-        doc.fillColor(COLORS.muted).font('Helvetica-Oblique').fontSize(8)
+        doc.fillColor(COLORS.muted).font('Unicode-Oblique').fontSize(8)
           .text(`Description: ${stop.reasoning || stop.tips}`, PAGE_MARGIN + 60, lineY, { width: 340 });
         lineY = doc.y + 1;
       }
 
       doc.y = Math.max(doc.y, lineY) + 6;
+      doc.x = PAGE_MARGIN; // stop rows position text at PAGE_MARGIN + 60 — reset before the next flow-based call
       doc.moveTo(PAGE_MARGIN, doc.y).lineTo(552, doc.y).lineWidth(0.5).strokeColor('#F0F0F5').stroke();
       doc.moveDown(0.4);
     });
@@ -319,8 +384,8 @@ function drawBudgetBreakdown(doc, budget) {
 
   rows.forEach(([label, val]) => {
     const y = doc.y;
-    doc.fillColor(COLORS.navy).font('Helvetica').fontSize(10).text(label, PAGE_MARGIN, y, { width: 200 });
-    doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(10)
+    doc.fillColor(COLORS.navy).font('Unicode').fontSize(10).text(label, PAGE_MARGIN, y, { width: 200 });
+    doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(10)
       .text(`₹${Number(val).toLocaleString('en-IN')}`, PAGE_MARGIN, y, { width: 510, align: 'right' });
     doc.moveDown(0.5);
   });
@@ -328,14 +393,14 @@ function drawBudgetBreakdown(doc, budget) {
   doc.moveTo(PAGE_MARGIN, doc.y).lineTo(552, doc.y).lineWidth(0.75).strokeColor(COLORS.navy).stroke();
   doc.moveDown(0.3);
   const y = doc.y;
-  doc.fillColor(COLORS.coral).font('Helvetica-Bold').fontSize(11).text('Total estimated cost', PAGE_MARGIN, y, { width: 200 });
-  doc.fillColor(COLORS.coral).font('Helvetica-Bold').fontSize(11)
+  doc.fillColor(COLORS.coral).font('Unicode-Bold').fontSize(11).text('Total estimated cost', PAGE_MARGIN, y, { width: 200 });
+  doc.fillColor(COLORS.coral).font('Unicode-Bold').fontSize(11)
     .text(`₹${total.toLocaleString('en-IN')}`, PAGE_MARGIN, y, { width: 510, align: 'right' });
   doc.moveDown(0.3);
 
   if (budget.total_budget_inr) {
     const remaining = Number(budget.total_budget_inr) - total;
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(9)
       .text(`Budget: ₹${Number(budget.total_budget_inr).toLocaleString('en-IN')}  ·  Remaining: ₹${remaining.toLocaleString('en-IN')}`);
   }
   doc.moveDown(0.5);
@@ -352,13 +417,13 @@ async function drawEmergencyServicesSection(doc, trip, emergencyContacts) {
     emergencyContacts.national_numbers.forEach((n) => {
       ensureSpace(doc, 16);
       const y = doc.y;
-      doc.fillColor(COLORS.navy).font('Helvetica').fontSize(9).text(n.label, PAGE_MARGIN, y, { width: 380 });
-      doc.fillColor(COLORS.coral).font('Helvetica-Bold').fontSize(9).text(n.number, PAGE_MARGIN, y, { width: 510, align: 'right' });
+      doc.fillColor(COLORS.navy).font('Unicode').fontSize(9).text(n.label, PAGE_MARGIN, y, { width: 380 });
+      doc.fillColor(COLORS.coral).font('Unicode-Bold').fontSize(9).text(n.number, PAGE_MARGIN, y, { width: 510, align: 'right' });
       doc.moveDown(0.35);
     });
     doc.moveDown(0.3);
   } else {
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(9)
       .text('National emergency numbers were not available when this itinerary was generated.');
     doc.moveDown(0.3);
   }
@@ -385,41 +450,54 @@ async function drawEmergencyServicesSection(doc, trip, emergencyContacts) {
 
   categories.forEach(([key, label]) => {
     ensureSpace(doc, 30);
-    doc.fillColor(COLORS.muted).font('Helvetica-Bold').fontSize(8.5).text(label.toUpperCase());
+    doc.fillColor(COLORS.muted).font('Unicode-Bold').fontSize(8.5).text(label.toUpperCase());
     doc.moveDown(0.2);
 
     const items = live?.[key] || [];
     if (!items.length) {
-      doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
+      doc.fillColor(COLORS.muted).font('Unicode').fontSize(9)
         .text(`No ${label.toLowerCase()} found nearby for this destination.`);
       doc.moveDown(0.3);
       return;
     }
 
     items.forEach((f) => {
-      ensureSpace(doc, 34);
+      // Reserve real space up front: a long facility name commonly wraps to
+      // 2 lines at this column width, which the old fixed `ensureSpace(34)`
+      // never accounted for.
+      const estNameHeight = doc.font('Unicode-Bold').fontSize(9.5).heightOfString(f.name || 'Facility', { width: 340 });
+      ensureSpace(doc, estNameHeight + 34);
       const y = doc.y;
-      doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(9.5)
+      doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(9.5)
         .text(f.name || 'Facility', PAGE_MARGIN, y, { width: 340 });
+      // Capture where the (possibly 2-line) name actually ended BEFORE
+      // drawing anything else at this same starting `y` — a sibling
+      // .text() call always moves doc.y to wherever IT finishes, so
+      // printing the distance immediately after used to silently reset
+      // doc.y back up to a single short line, and every line below
+      // (address/phone) — and the next facility's whole block — would
+      // then be laid out too high and collide with this one.
+      const nameBottomY = doc.y;
       if (f.distance_km != null) {
-        doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
+        doc.fillColor(COLORS.muted).font('Unicode').fontSize(9)
           .text(`${f.distance_km} km`, PAGE_MARGIN, y, { width: 510, align: 'right' });
       }
-      let lineY = doc.y + 1;
+      let lineY = Math.max(doc.y, nameBottomY) + 1;
       if (f.address) {
-        doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8.5)
+        doc.fillColor(COLORS.muted).font('Unicode').fontSize(8.5)
           .text(f.address, PAGE_MARGIN, lineY, { width: 340 });
         lineY = doc.y + 1;
       }
       if (f.phone) {
-        doc.fillColor(COLORS.coral).font('Helvetica-Bold').fontSize(8.5)
+        doc.fillColor(COLORS.coral).font('Unicode-Bold').fontSize(8.5)
           .text(`Tel: ${f.phone}`, PAGE_MARGIN, lineY, { width: 340 });
+        lineY = doc.y + 1;
       }
       const mapsUrl = f.maps_url || (f.latitude != null && f.longitude != null
         ? `https://www.google.com/maps/search/?api=1&query=${f.latitude},${f.longitude}`
         : null);
       if (mapsUrl) {
-        doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(8.5)
+        doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(8.5)
           .text('Open in Google Maps', PAGE_MARGIN + 350, y + 12, { width: 160, align: 'right', link: mapsUrl, underline: true });
       }
       doc.y = Math.max(doc.y, lineY) + 6;
@@ -463,7 +541,7 @@ async function drawOffersSection(doc, trip) {
 
   const offers = await fetchRelevantOffers(trip?.destination);
   if (!offers.length) {
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(9)
       .text('No active business offers are available for this destination right now.');
     doc.moveDown(0.4);
     return;
@@ -476,25 +554,25 @@ async function drawOffersSection(doc, trip) {
       ? (o.discount_type === 'flat' ? `₹${o.discount_value} off` : `${o.discount_value}% off`)
       : 'Special offer';
 
-    doc.fillColor(COLORS.navy).font('Helvetica-Bold').fontSize(9.5)
+    doc.fillColor(COLORS.navy).font('Unicode-Bold').fontSize(9.5)
       .text(o.title || 'Offer', PAGE_MARGIN, y, { width: 340 });
-    doc.fillColor(COLORS.coral).font('Helvetica-Bold').fontSize(9.5)
+    doc.fillColor(COLORS.coral).font('Unicode-Bold').fontSize(9.5)
       .text(discountLabel, PAGE_MARGIN, y, { width: 510, align: 'right' });
 
     let lineY = doc.y + 1;
     const businessName = o.businesses?.business_name;
     if (businessName) {
-      doc.fillColor(COLORS.muted).font('Helvetica-Oblique').fontSize(8.5)
+      doc.fillColor(COLORS.muted).font('Unicode-Oblique').fontSize(8.5)
         .text(businessName, PAGE_MARGIN, lineY, { width: 340 });
       lineY = doc.y + 1;
     }
     if (o.description) {
-      doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8.5)
+      doc.fillColor(COLORS.muted).font('Unicode').fontSize(8.5)
         .text(o.description, PAGE_MARGIN, lineY, { width: 470 });
       lineY = doc.y + 1;
     }
     if (o.valid_until) {
-      doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8)
+      doc.fillColor(COLORS.muted).font('Unicode').fontSize(8)
         .text(`Valid until ${o.valid_until}`, PAGE_MARGIN, lineY, { width: 340 });
       lineY = doc.y + 1;
     }
@@ -510,7 +588,7 @@ async function drawMapSection(doc, stops) {
 
   const points = stops.filter((s) => s.latitude != null && s.longitude != null);
   if (!points.length) {
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9).text('No coordinates available to render a route map.');
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(9).text('No coordinates available to render a route map.');
     doc.moveDown(0.4);
     return;
   }
@@ -525,7 +603,7 @@ async function drawMapSection(doc, stops) {
       // aspect ratio, so it can never crop or stretch/overlap surrounding text.
       doc.image(imageBuffer, PAGE_MARGIN, doc.y, { width: 510, height: 240, fit: [510, 240] });
       doc.moveDown(12.5);
-      doc.fillColor(COLORS.muted).font('Helvetica').fontSize(7.5)
+      doc.fillColor(COLORS.muted).font('Unicode').fontSize(7.5)
         .text('Map data © Google Maps · Numbered pins follow the stop order above.', { align: 'center' });
       mapImageDrawn = true;
     } catch {
@@ -534,7 +612,7 @@ async function drawMapSection(doc, stops) {
   }
 
   if (!mapImageDrawn) {
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(9)
       .text('A route map image is unavailable in this export — use the direct navigation links below, or view the interactive map inside the GoVIBE app.');
   }
 
@@ -543,17 +621,25 @@ async function drawMapSection(doc, stops) {
   // turn-by-turn directions even without the static map image.
   doc.moveDown(0.5);
   ensureSpace(doc, 20);
-  doc.fillColor(COLORS.muted).font('Helvetica-Bold').fontSize(8.5).text('OPEN EACH DESTINATION IN GOOGLE MAPS');
+  doc.fillColor(COLORS.muted).font('Unicode-Bold').fontSize(8.5).text('OPEN EACH DESTINATION IN GOOGLE MAPS');
   doc.moveDown(0.3);
 
   points.forEach((stop, i) => {
-    ensureSpace(doc, 16);
     const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${stop.latitude},${stop.longitude}`;
+    const label = `${i + 1}. ${stop.name || 'Stop'}`;
+    const estHeight = doc.font('Unicode').fontSize(9).heightOfString(label, { width: 340 });
+    ensureSpace(doc, estHeight + 6);
     const y = doc.y;
-    doc.fillColor(COLORS.navy).font('Helvetica').fontSize(9)
-      .text(`${i + 1}. ${stop.name || 'Stop'}`, PAGE_MARGIN, y, { width: 340 });
-    doc.fillColor(COLORS.coral).font('Helvetica-Bold').fontSize(8.5)
+    doc.fillColor(COLORS.navy).font('Unicode').fontSize(9)
+      .text(label, PAGE_MARGIN, y, { width: 340 });
+    // Same fix as the emergency-services list below: capture the name's
+    // real (possibly wrapped) bottom edge before the link is drawn at the
+    // same starting `y`, so a long place name can never be overwritten by
+    // the next row starting too early.
+    const nameBottomY = doc.y;
+    doc.fillColor(COLORS.coral).font('Unicode-Bold').fontSize(8.5)
       .text('Open in Google Maps', PAGE_MARGIN + 350, y, { width: 160, align: 'right', link: mapsUrl, underline: true });
+    doc.y = Math.max(doc.y, nameBottomY);
     doc.moveDown(0.35);
   });
   doc.moveDown(0.4);
@@ -592,12 +678,22 @@ async function drawQrCodeSection(doc, trip) {
     const base64 = dataUrl.split(',')[1];
     const imageBuffer = Buffer.from(base64, 'base64');
     ensureSpace(doc, 110);
-    doc.image(imageBuffer, PAGE_MARGIN, doc.y, { width: 90, height: 90 });
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
-      .text('Scan to reopen this itinerary inside GoVIBE AI on your phone.', PAGE_MARGIN + 104, doc.y - 60, { width: 350 });
-    doc.y += 40;
+    // Bug fix: doc.image() with an explicit x/y does NOT advance doc.y in
+    // pdfkit (only doc.text() does), so the old `doc.y - 60` below was
+    // computed from the SAME y as the image's top edge, not "60pt below
+    // where the image ended" as intended — it pushed the caption 60pt
+    // higher than the image, overlapping whatever section came right
+    // before this one. Capturing the top explicitly and offsetting the
+    // caption *down* from it (to vertically center against the 90pt-tall
+    // QR code) fixes the overlap and lets doc.y be set correctly for
+    // whatever renders next.
+    const qrTop = doc.y;
+    doc.image(imageBuffer, PAGE_MARGIN, qrTop, { width: 90, height: 90 });
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(9)
+      .text('Scan to reopen this itinerary inside GoVIBE AI on your phone.', PAGE_MARGIN + 104, qrTop + 35, { width: 350 });
+    doc.y = qrTop + 100;
   } catch {
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9).text('QR code unavailable for this download.');
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(9).text('QR code unavailable for this download.');
   }
   doc.moveDown(0.4);
 }
@@ -614,8 +710,15 @@ function drawTravelTips(doc, travelTips) {
 
   tips.forEach((tip) => {
     ensureSpace(doc, 20);
-    doc.fillColor(COLORS.coral).font('Helvetica-Bold').fontSize(9).text('•  ', PAGE_MARGIN, doc.y, { continued: true, width: 20 });
-    doc.fillColor(COLORS.navy).font('Helvetica').fontSize(9).text(tip, { width: 495 });
+    // Bug fix: passing `width` on the first half of a `continued: true`
+    // text run constrains the WHOLE continued line (bullet + tip) to that
+    // narrow column in pdfkit, not just the bullet glyph — that's what
+    // produced the "Carry / a pri / nted / or o / ffline..." one-clump-
+    // per-line wrapping. Dropping `width` here (and letting the bullet
+    // size itself) fixes it; the indent for wrapped lines is handled
+    // below via `indent`/`x` on the tip text itself instead.
+    doc.fillColor(COLORS.coral).font('Unicode-Bold').fontSize(9).text('•  ', PAGE_MARGIN, doc.y, { continued: true });
+    doc.fillColor(COLORS.navy).font('Unicode').fontSize(9).text(tip, { width: 495 });
     doc.moveDown(0.25);
   });
 }
@@ -624,7 +727,7 @@ function drawFooterPageNumbers(doc) {
   const range = doc.bufferedPageRange();
   for (let i = range.start; i < range.start + range.count; i++) {
     doc.switchToPage(i);
-    doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8)
+    doc.fillColor(COLORS.muted).font('Unicode').fontSize(8)
       .text(`GoVIBE AI  ·  Page ${i + 1} of ${range.count}`, PAGE_MARGIN, 800, { width: 510, align: 'center' });
   }
 }

@@ -10,10 +10,20 @@ function getAuthHeaders() {
 }
 
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...getAuthHeaders(), ...options.headers },
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders(), ...options.headers },
+      ...options,
+    });
+  } catch (networkErr) {
+    // The browser's fetch() throws a bare "Failed to fetch" TypeError when it
+    // can't even reach the server (backend down, wrong port/URL, or blocked
+    // by CORS). Surface something actionable instead of that generic message.
+    throw new Error(
+      `Can't reach the GoVIBE backend at ${BASE_URL}. Make sure the backend server is running (cd backend && npm run dev) and that VITE_API_URL points at the right port.`
+    );
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(data.error || `Request failed (${res.status})`);
@@ -99,15 +109,20 @@ export const api = {
     return { blob: await res.blob(), filename: match?.[1] || 'itinerary.pdf' };
   },
 
-  getSpots: ({ city, category, hiddenGems } = {}) => {
+  getSpots: ({ city, category, hiddenGems, hiddenGemCategory } = {}) => {
     const params = new URLSearchParams();
     if (city) params.set('city', city);
-    if (category) params.set('category', category);
-    if (hiddenGems) params.set('hiddenGems', 'true');
+    if (hiddenGems) {
+      params.set('hiddenGems', 'true');
+      if (hiddenGemCategory) params.set('hiddenGemCategory', hiddenGemCategory);
+    } else if (category) {
+      params.set('category', category);
+    }
     const qs = params.toString();
     return request(`/spots${qs ? `?${qs}` : ''}`);
   },
   getSpotCategories: () => request('/spots/categories'),
+  getHiddenGemCategories: () => request('/spots/hidden-gem-categories'),
 
   // Powers LocationAutocomplete — returns { suggestions: [...] }.
   autocompletePlaces: (query, { limit, signal } = {}) => {

@@ -127,3 +127,26 @@ export function validateBudget({
     remaining_budget_inr: remainingInr,
   };
 }
+
+/**
+ * Step 9 follow-up — Budget Feasibility: the auto-trim step in the
+ * itinerary engine can only ever recover money by dropping *stops*
+ * (entry fees, mostly). For a low budget relative to group size/duration,
+ * food and transport alone — costs that exist even with ZERO attractions
+ * on the itinerary — can already exceed the traveler's stated budget. In
+ * that case trimming stops is pointless (it was previously the only
+ * lever pulled, even when every stop had a ₹0 entry fee, which silently
+ * did nothing) and the honest thing is to say so plainly, the same way
+ * the Gemini prompt is instructed to when a budget is unrealistic.
+ */
+export function checkBudgetFeasibility({ totalBudgetInr, transportCostInr = 0, foodCostInr = 0 }) {
+  const budget = Number(totalBudgetInr) || 0;
+  const bareMinimumInr = Math.round(transportCostInr + foodCostInr);
+  if (budget === 0) return { feasible: true, bareMinimumInr, shortfallInr: 0 };
+  const feasible = bareMinimumInr <= budget;
+  return {
+    feasible,
+    bareMinimumInr,
+    shortfallInr: feasible ? 0 : bareMinimumInr - budget,
+  };
+}

@@ -27,7 +27,9 @@ const actions = [
     title: "Hidden Gems",
     desc: "Discover unique local experiences and places beyond the usual tourist spots.",
     icon: Sparkles,
-    path: "/explore",
+    // Deep-links straight into Explore's Hidden Gems filter (and its 5
+    // category chips) instead of landing on the generic "All" view.
+    path: "/explore?filter=hidden",
     accent: "#16A34A",
     tint: "#DCFCE7",
   },

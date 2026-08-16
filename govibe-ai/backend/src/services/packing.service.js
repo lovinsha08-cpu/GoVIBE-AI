@@ -42,12 +42,12 @@ export function buildPackingList({
 
   // Interest-driven
   const categories = new Set((interests || []).map((i) => i.category));
-  if (categories.has('adventure') || categories.has('nature')) {
+  if (categories.has('sports_adventure') || categories.has('nature_scenic') || categories.has('wildlife')) {
     add('Comfortable walking/hiking shoes');
     add('Insect repellent');
     add('Small daypack for excursions');
   }
-  if (categories.has('heritage')) {
+  if (categories.has('heritage_historical') || categories.has('religious_spiritual')) {
     add('Modest clothing that covers shoulders/knees (required at many temples/forts)');
   }
   if (categories.has('nightlife')) {

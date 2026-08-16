@@ -105,7 +105,14 @@ export async function updateUserMemory(userId, role, patch) {
 // ------------------------------------------------------------
 const FOOD_KEYWORDS = { vegan: 'vegan', vegetarian: 'veg', veg: 'veg', 'non-veg': 'non_veg', nonveg: 'non_veg', 'non veg': 'non_veg', jain: 'jain' };
 const TRANSPORT_KEYWORDS = { cab: 'cab', taxi: 'cab', metro: 'metro', train: 'train', bus: 'bus', bike: 'bike', walk: 'walk', walking: 'walk', flight: 'flight' };
-const INTEREST_KEYWORDS = ['nature', 'heritage', 'adventure', 'food', 'shopping', 'family', 'nightlife', 'relaxation', 'photography', 'hidden gems', 'temples', 'beaches', 'trekking', 'museums'];
+const INTEREST_KEYWORDS = [
+  'religious', 'spiritual', 'temple', 'church', 'mosque', 'heritage', 'historical', 'fort', 'museum',
+  'nature', 'scenic', 'beach', 'park', 'garden', 'lake', 'wildlife', 'zoo', 'aquarium',
+  'entertainment', 'recreation', 'amusement', 'theme park', 'arts', 'culture', 'gallery', 'theatre',
+  'science', 'learning', 'planetarium', 'library', 'shopping', 'mall', 'market', 'food', 'dining',
+  'photography', 'landmark', 'viewpoint', 'sunrise', 'sunset', 'sports', 'adventure', 'wellness',
+  'leisure', 'spa', 'yoga', 'nightlife', 'pub', 'bar', 'lounge',
+];
 
 export function extractPreferencesFromMessage(message) {
   const lower = message.toLowerCase();

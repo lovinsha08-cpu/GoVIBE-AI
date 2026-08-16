@@ -158,7 +158,7 @@ export function weatherNotePlaceholder() {
  * know when to show up and when to stay away — not just what the crowd
  * level will be at their scheduled arrival time.
  */
-const EARLY_BEST_CATEGORIES = new Set(['heritage', 'nature', 'adventure']);
+const EARLY_BEST_CATEGORIES = new Set(['heritage_historical', 'nature_scenic', 'sports_adventure', 'religious_spiritual', 'wildlife']);
 
 export function suggestBestVisitTime(category, isWeekend) {
   if (EARLY_BEST_CATEGORIES.has(category)) {
@@ -168,7 +168,7 @@ export function suggestBestVisitTime(category, isWeekend) {
       tip: 'Arriving within the first hour of opening beats tour buses and gives softer light for photos.',
     };
   }
-  if (category === 'food') {
+  if (category === 'food_dining') {
     return {
       best_time: 'Off-peak hours, roughly 3 – 6 PM',
       avoid_time: '1 – 2 PM and 8 – 9 PM (peak meal rush)',

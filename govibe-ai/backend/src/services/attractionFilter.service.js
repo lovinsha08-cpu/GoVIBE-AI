@@ -14,14 +14,19 @@
 // Categories the rest of the app already uses (spot.category). Anything
 // outside this allow-list is dropped before scoring/selection ever sees it.
 export const ALLOWED_SPOT_CATEGORIES = new Set([
-  'nature',
-  'heritage', // "Culture & Heritage" in the UI
-  'adventure',
-  'food',
+  'religious_spiritual',
+  'heritage_historical',
+  'nature_scenic',
+  'wildlife',
+  'entertainment_recreation',
+  'arts_culture',
+  'science_learning',
   'shopping',
-  'family',
-  'nightlife', // "Entertainment" in the UI
-  'relaxation',
+  'food_dining',
+  'photography_landmarks',
+  'sports_adventure',
+  'wellness_leisure',
+  'nightlife',
   'stay', // hotels/homestays — needed for accommodation, not shown as a "stop"
 ]);
 
@@ -112,6 +117,13 @@ export function filterGenuineTouristSpots(spots = []) {
  */
 export function isValidItineraryStop(stop) {
   if (!stop?.name) return false;
+  // A stop with no real coordinates can't be placed on the map or used to
+  // compute route distance/travel time — this is what used to let a
+  // Gemini-invented/unmatched place name slip through as a "valid" stop
+  // and silently vanish from the itinerary map (only the stops that
+  // happened to match a dataset entry ever had lat/lng, so most of the
+  // map went blank while the timeline still listed every stop).
+  if (!Number.isFinite(stop.latitude) || !Number.isFinite(stop.longitude)) return false;
   if (EXCLUDED_NAME_PATTERNS.some((re) => re.test(stop.name))) return false;
   // Stops from the Gemini path may carry a free-text category the model
   // invented (e.g. "Historical Site") rather than one of our internal

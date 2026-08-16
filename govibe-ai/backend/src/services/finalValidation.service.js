@@ -99,7 +99,7 @@ function checkMealsScheduledCorrectly(stops) {
 
 /** ✓ Are restaurants separated from attractions (never treated as sightseeing stops)? */
 function checkRestaurantsSeparatedFromAttractions(stops) {
-  const violations = stops.filter((s) => s.category === 'food' && !s.meal_type);
+  const violations = stops.filter((s) => s.category === 'food_dining' && !s.meal_type);
   return {
     passed: violations.length === 0,
     detail: violations.length
@@ -152,10 +152,46 @@ function checkBudgetRespected(budgetValidation) {
 }
 
 /**
+ * ✓ Does the itinerary actually reflect the traveler's spread of interests,
+ * rather than one requested category swallowing the whole route? This is
+ * the missing check that let a candidate pool skewed toward a single
+ * category (most often shopping malls — numerous and well-rated in most
+ * cities) produce a "technically valid" itinerary that ignored every other
+ * interest the traveler picked. It runs on BOTH generation paths (heuristic
+ * and Gemini/AI) since a narrow candidate pool or a model that ignored the
+ * prompt's diversity instructions can produce the same lopsided result
+ * either way.
+ */
+function checkInterestDiversityRespected(stops, requestedCategories) {
+  const uniqueRequested = [...new Set((requestedCategories || []).filter(Boolean))];
+  if (uniqueRequested.length <= 1) {
+    return { passed: true, detail: 'Only one interest category requested — nothing to balance.' };
+  }
+  const relevantStops = stops.filter((s) => uniqueRequested.includes(s.category));
+  if (relevantStops.length === 0) {
+    return { passed: true, detail: 'No stops tagged with a requested category to evaluate.' };
+  }
+  const present = new Set(relevantStops.map((s) => s.category));
+  const missing = uniqueRequested.filter((c) => !present.has(c));
+  // One requested category missing entirely can be a genuine "nothing
+  // nearby" case (e.g. "beach" for a hill town). Two or more missing from a
+  // multi-interest trip is the "9 stops, all shopping malls" failure mode —
+  // almost always a sign the candidate pool itself was too narrow, not that
+  // the traveler's other interests genuinely don't exist at this destination.
+  const passed = missing.length <= 1;
+  return {
+    passed,
+    detail: passed
+      ? `Itinerary touches ${present.size}/${uniqueRequested.length} requested interest categories.`
+      : `Itinerary only covers ${present.size}/${uniqueRequested.length} requested interests — missing: ${missing.join(', ')}.`,
+  };
+}
+
+/**
  * Runs the full Step 10 checklist and returns a report:
  * { passed, checks: [{ id, label, passed, detail }], failedCheckIds }
  */
-export function runFinalValidation({ stops, candidates, hiddenGems, budgetValidation, tripStartHour }) {
+export function runFinalValidation({ stops, candidates, hiddenGems, budgetValidation, tripStartHour, requestedCategories }) {
   const checks = [
     { id: 'iconic_attractions_included', label: "Destination's iconic attractions are included", ...checkIconicAttractionsIncluded(stops, candidates) },
     { id: 'route_optimized', label: 'Route is geographically optimized', ...checkRouteOptimized(stops) },
@@ -166,6 +202,7 @@ export function runFinalValidation({ stops, candidates, hiddenGems, budgetValida
     { id: 'hidden_gems_optional', label: 'Hidden gems are optional, not forced', ...checkHiddenGemsOptional(stops, hiddenGems) },
     { id: 'feasible_within_time', label: 'Itinerary is feasible within available time', ...checkFeasibleWithinTime(stops, tripStartHour) },
     { id: 'budget_respected', label: 'Budget is respected', ...checkBudgetRespected(budgetValidation) },
+    { id: 'interest_diversity_respected', label: "Itinerary reflects the traveler's full spread of interests", ...checkInterestDiversityRespected(stops, requestedCategories) },
   ];
 
   const failedCheckIds = checks.filter((c) => !c.passed).map((c) => c.id);

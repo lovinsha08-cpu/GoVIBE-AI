@@ -26,14 +26,19 @@ function pinIcon({ color = '#2563EB', label } = {}) {
 }
 
 const CATEGORY_COLOR = {
-  heritage: '#22C55E',
-  nature: '#16A34A',
-  food: '#2563EB',
-  adventure: '#2563EB',
-  relaxation: '#16A34A',
+  religious_spiritual: '#E8A33D',
+  heritage_historical: '#22C55E',
+  nature_scenic: '#16A34A',
+  wildlife: '#0E9F6E',
+  entertainment_recreation: '#F97316',
+  arts_culture: '#A855F7',
+  science_learning: '#0EA5E9',
   shopping: '#8B7FD6',
-  nightlife: '#8B7FD6',
-  family: '#22C55E',
+  food_dining: '#2563EB',
+  photography_landmarks: '#EC4899',
+  sports_adventure: '#DC2626',
+  wellness_leisure: '#14B8A6',
+  nightlife: '#7C3AED',
   stay: '#0C3B5E',
 };
 
@@ -89,7 +94,7 @@ export default function RealMap({ spots = [], showRoute = false, height = 260 })
         {showRoute && points.length > 1 && (
           <Polyline positions={points} pathOptions={{ color: '#2563EB', weight: 3, dashArray: '6 8' }} />
         )}
-        {spots.map((s, i) => (
+        {spots.filter((s) => s.latitude != null && s.longitude != null).map((s, i) => (
           <Marker
             key={s.id ?? `${s.name}-${i}`}
             position={[s.latitude, s.longitude]}

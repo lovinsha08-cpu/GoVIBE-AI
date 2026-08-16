@@ -1,69 +1,86 @@
-// Mirrors backend/supabase/schema.sql interest_categories seed data.
-// Slugs are kept backward-compatible with backend spot.category values
-// (see backend/src/services/spotMatching.service.js) so existing scoring
-// logic keeps working: 'heritage' = Culture & Heritage, 'nightlife' =
-// Entertainment. 'photography' and 'hidden_gems' are cross-cutting picks
-// matched by spot traits rather than a literal category (see
-// spotMatching.service.js).
+// GoVIBE AI – Master Categories & Subcategories.
+// Slugs are the internal spot.category values used across the backend
+// (see backend/src/services/spotMatching.service.js,
+// attractionFilter.service.js, itineraryEngine.service.js, etc.) so
+// picking a category here directly drives which spots get scored/selected.
+// 'stay' is an internal-only category (accommodation) and isn't shown here.
 export const INTEREST_CATEGORIES = [
   {
-    slug: 'nature',
-    label: 'Nature & Outdoors',
-    emoji: '🌿',
-    subcategories: ['Beaches', 'Parks & Gardens', 'Lakes & Rivers', 'Waterfalls', 'Hills & Viewpoints', 'Wildlife Sanctuaries', 'Botanical Gardens'],
+    slug: 'religious_spiritual',
+    label: 'Religious & Spiritual',
+    emoji: '🛕',
+    subcategories: ['Temples', 'Churches', 'Mosques', 'Jain Temples', 'Gurudwaras', 'Ashrams'],
   },
   {
-    slug: 'heritage',
-    label: 'Culture & Heritage',
+    slug: 'heritage_historical',
+    label: 'Heritage & Historical',
     emoji: '🏛',
-    subcategories: ['Temples', 'Churches', 'Mosques', 'Forts & Palaces', 'Museums', 'Monuments', 'Art Galleries', 'Heritage Walks'],
+    subcategories: ['Forts', 'Memorials', 'Museums', 'Heritage Buildings', 'Monuments', 'Archaeological Sites'],
   },
   {
-    slug: 'adventure',
-    label: 'Adventure',
+    slug: 'nature_scenic',
+    label: 'Nature & Scenic',
+    emoji: '🌿',
+    subcategories: ['Beaches', 'Parks', 'Gardens', 'Lakes', 'Rivers & Backwaters', 'Eco Parks', 'Bird Sanctuaries', 'Mangroves'],
+  },
+  {
+    slug: 'wildlife',
+    label: 'Wildlife',
+    emoji: '🐘',
+    subcategories: ['Zoos', 'Aquariums', 'Snake Parks', 'Wildlife Parks'],
+  },
+  {
+    slug: 'entertainment_recreation',
+    label: 'Entertainment & Recreation',
     emoji: '🎢',
-    subcategories: ['Trekking', 'Hiking', 'Camping', 'Cycling', 'Water Sports', 'Adventure Parks', 'Rock Climbing'],
+    subcategories: ['Amusement Parks', 'Water Parks', 'Theme Parks', 'Gaming Zones', 'Escape Rooms', 'Bowling Centres', 'Trampoline Parks'],
   },
   {
-    slug: 'food',
-    label: 'Food & Dining',
-    emoji: '🍽',
-    subcategories: ['Street Food', 'Local Cuisine', 'Fine Dining', 'Cafés', 'Dessert Spots', 'Rooftop Restaurants'],
+    slug: 'arts_culture',
+    label: 'Arts & Culture',
+    emoji: '🎨',
+    subcategories: ['Art Galleries', 'Cultural Centres', 'Music & Dance Venues', 'Theatres', 'Exhibition Centres'],
+  },
+  {
+    slug: 'science_learning',
+    label: 'Science & Learning',
+    emoji: '🔬',
+    subcategories: ['Science Centres', 'Planetariums', 'Libraries', 'Educational Museums'],
   },
   {
     slug: 'shopping',
     label: 'Shopping',
     emoji: '🛍',
-    subcategories: ['Local Markets', 'Handicrafts', 'Souvenirs', 'Flea Markets', 'Shopping Malls'],
+    subcategories: ['Shopping Malls', 'Street Markets', 'Flea Markets', 'Handicraft Stores', 'Textile & Silk Stores', 'Bookstores'],
   },
   {
-    slug: 'family',
-    label: 'Family & Kids',
-    emoji: '👨‍👩‍👧',
-    subcategories: ['Zoos', 'Aquariums', 'Science Centers', "Children's Parks", 'Theme Parks'],
+    slug: 'food_dining',
+    label: 'Food & Dining',
+    emoji: '🍽',
+    subcategories: ['Restaurants', 'Cafés', 'Street Food', 'Bakeries', 'Fine Dining', 'Rooftop Dining', 'Food Courts'],
+  },
+  {
+    slug: 'photography_landmarks',
+    label: 'Photography & Landmarks',
+    emoji: '📸',
+    subcategories: ['Lighthouses', 'Viewpoints', 'Sunrise Spots', 'Sunset Spots', 'Iconic Landmarks', 'Instagram Spots'],
+  },
+  {
+    slug: 'sports_adventure',
+    label: 'Sports & Adventure',
+    emoji: '🏟',
+    subcategories: ['Stadiums', 'Sports Complexes', 'Go-Karting', 'Adventure Parks', 'Indoor Sports'],
+  },
+  {
+    slug: 'wellness_leisure',
+    label: 'Wellness & Leisure',
+    emoji: '🧘',
+    subcategories: ['Spas', 'Yoga Centres', 'Meditation Centres', 'Wellness Retreats'],
   },
   {
     slug: 'nightlife',
-    label: 'Entertainment',
+    label: 'Nightlife',
     emoji: '🌃',
-    subcategories: ['Live Music', 'Cultural Shows', 'Movie Theatres', 'Gaming & VR', 'Nightlife'],
-  },
-  {
-    slug: 'relaxation',
-    label: 'Relaxation',
-    emoji: '🧘',
-    subcategories: ['Resorts', 'Spas', 'Beach Walks', 'Picnic Spots', 'Sunset Points'],
-  },
-  {
-    slug: 'photography',
-    label: 'Photography',
-    emoji: '📸',
-    subcategories: ['Scenic Viewpoints', 'Sunrise Spots', 'Sunset Spots', 'Architecture', 'Instagram-worthy Places'],
-  },
-  {
-    slug: 'hidden_gems',
-    label: 'Hidden Gems',
-    emoji: '💎',
-    subcategories: ['Offbeat Attractions', 'Secret Beaches', 'Lesser-known Temples', 'Local Markets', 'Hidden Cafés'],
+    subcategories: ['Pubs', 'Lounges', 'Bars', 'Night Cafés', 'Live Music Venues'],
   },
 ];
