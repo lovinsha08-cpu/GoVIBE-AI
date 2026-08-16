@@ -145,3 +145,11 @@ vite.config.ts.timestamp-*
 # Environment variables
 .env
 **/.env
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+**/dist/
