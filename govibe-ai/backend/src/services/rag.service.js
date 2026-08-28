@@ -94,7 +94,7 @@ export function formatKbContext(chunks) {
 
 export async function upsertFaq({ question, answer, category = null, audience = 'both' }) {
   if (!isSupabaseConfigured) return null;
-  const embedding = await embedText(`${question}\n${answer}`);
+  const embedding = await embedText(`${question}\n${answer}`, { taskType: 'RETRIEVAL_DOCUMENT' });
   const { data, error } = await supabaseAdmin
     .from('faqs')
     .insert({ question, answer, category, audience, embedding })
@@ -106,7 +106,7 @@ export async function upsertFaq({ question, answer, category = null, audience = 
 
 export async function upsertKbDocument({ title, content, source = null, category = null, audience = 'both', city = null }) {
   if (!isSupabaseConfigured) return null;
-  const embedding = await embedText(`${title}\n${content}`);
+  const embedding = await embedText(`${title}\n${content}`, { taskType: 'RETRIEVAL_DOCUMENT' });
   const { data, error } = await supabaseAdmin
     .from('kb_documents')
     .insert({ title, content, source, category, audience, city, embedding })

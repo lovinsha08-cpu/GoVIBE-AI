@@ -16,21 +16,27 @@
  *                              runs (cheap, local embedding + pgvector) and
  *                              its results are injected into the system
  *                              prompt as grounding context (requirement 7).
- *   4. Function calling     — Gemini is given the traveler/business tool set
+ *   4. Function calling     — the LLM (see llmProvider.service.js: Groq
+ *                              primary, Gemini fallback) is given the
+ *                              traveler/business tool set
  *                              (assistantFunctions.service.js) and decides
  *                              which real backend function(s) to call
  *                              (requirement 5) — including calling several
  *                              in one turn ("multiple tools together").
- *   5. General reasoning    — if Gemini calls no tools, it just answers
+ *   5. General reasoning    — if the model calls no tools, it just answers
  *                              conversationally, grounded by the RAG context
  *                              and conversation memory.
  *
- * This module is intentionally the ONLY place that talks to Gemini for the
- * general ("ask anything") assistant — assistant.service.js keeps its
- * existing trip-scoped swap/reorder logic untouched and only delegates here
- * for the no-trip-context path, preserving all current functionality.
+ * This module is intentionally the ONLY place that talks to the LLM
+ * provider layer for the general ("ask anything") assistant —
+ * assistant.service.js keeps its existing trip-scoped swap/reorder logic
+ * untouched and only delegates here for the no-trip-context path,
+ * preserving all current functionality. Which underlying provider (Groq or
+ * Gemini) actually answered a given turn is decided entirely inside
+ * llmProvider.service.js — this file has no provider-specific branching,
+ * by design (see llmProvider.service.js's contract).
  */
-import { callGeminiWithTools } from './ai.service.js';
+import { callLlmWithTools } from './llmProvider.service.js';
 import { findFaqMatch, retrieveKbContext, formatKbContext } from './rag.service.js';
 import { getFunctionDeclarations, getFunctionHandler } from './assistantFunctions.service.js';
 import {
@@ -58,6 +64,32 @@ export function classifyQuery(message) {
   if (signals.length === 0) signals.push('rag');
   if (signals.length > 1) return { type: 'multi_tool', signals };
   return { type: signals[0], signals };
+}
+
+// ------------------------------------------------------------
+// Pure small-talk / meta gate. Deliberately narrow (short, exact-shaped
+// phrases only) so it can never swallow a genuine question — a message
+// this matches is guaranteed to need no tool, no RAG lookup, and no FAQ
+// lookup, so we skip all three instead of relying solely on Gemini's
+// tool-calling AUTO mode to "decide" not to call anything. This is what
+// keeps a plain "hello" fast: no embedding round-trips, and no tool
+// declarations for the model to reason about at all.
+// ------------------------------------------------------------
+const SIMPLE_CHAT_PATTERNS = [
+  /^(hi|hello|hey|yo|hiya|sup|howdy)[\s!.,]*$/i,
+  /^good\s?(morning|afternoon|evening|night)[\s!.,]*$/i,
+  /^(thanks|thank\s?you|thx|ty|cool|ok|okay|great|nice one|got it|sounds good)[\s!.,]*$/i,
+  /^who\s+are\s+you\??$/i,
+  /^what\s+can\s+you\s+(help( me)?( with)?|do)\b.*\??$/i,
+  /^what('?s| is)\s+your\s+name\??$/i,
+  /^how\s+are\s+you\??$/i,
+  /^(bye|goodbye|see ya|see you)[\s!.,]*$/i,
+];
+
+export function isSimpleConversational(message) {
+  const trimmed = (message || '').trim();
+  if (!trimmed || trimmed.split(/\s+/).length > 8) return false;
+  return SIMPLE_CHAT_PATTERNS.some((re) => re.test(trimmed));
 }
 
 // ------------------------------------------------------------
@@ -106,6 +138,12 @@ function historyToGeminiContents(history) {
  */
 export async function orchestrateChat({ userId, role, message, location = null, tripHint = null }) {
   const classification = classifyQuery(message);
+  // Pure small talk ("hello", "thanks", "who are you"...) never needs a
+  // tool, an FAQ lookup, or a KB lookup — see isSimpleConversational above.
+  // Skipping all three here is what satisfies "simple messages should not
+  // enter a tool-calling path": there is no tool declaration in the request
+  // at all for these, so there's nothing for Gemini to reason about calling.
+  const isSimpleChat = isSimpleConversational(message);
 
   // ---- Conversation + memory context ----
   const conversation = userId ? await getOrCreateConversation({ userId, role, tripId: null }) : null;
@@ -125,7 +163,7 @@ export async function orchestrateChat({ userId, role, message, location = null, 
   }
 
   // ---- Step 2: FAQ short-circuit (requirement 8) ----
-  const faqMatch = await findFaqMatch(message, role);
+  const faqMatch = isSimpleChat ? null : await findFaqMatch(message, role);
   if (faqMatch?.highConfidence) {
     const reply = faqMatch.faq.answer;
     if (conversation) {
@@ -138,24 +176,43 @@ export async function orchestrateChat({ userId, role, message, location = null, 
   }
 
   // ---- Step 3: RAG grounding context (requirement 7) ----
-  const kbChunks = await retrieveKbContext(message, { audience: role, city: memory?.home_city || null, limit: 5 });
+  const kbChunks = isSimpleChat ? [] : await retrieveKbContext(message, { audience: role, city: memory?.home_city || null, limit: 5 });
   const kbContext = formatKbContext(kbChunks);
 
   // ---- Step 4/5: function calling + reasoning ----
   const systemInstruction = buildSystemInstruction({ role, memory, kbContext, location });
-  const tools = getFunctionDeclarations(role);
+  const tools = isSimpleChat ? [] : getFunctionDeclarations(role);
   const contents = [...historyToGeminiContents(history), { role: 'user', parts: [{ text: message }] }];
 
   const toolsUsed = [];
   let round = 0;
   let finalText = null;
+  // True only once a round completes with `ok: true` and no further tool
+  // calls — i.e. the model gave its actual final answer, however short.
+  // Distinct from `finalText` being truthy: a model can legitimately give
+  // a valid empty-string final answer, and that must NOT be mistaken for
+  // "the assistant never responded" (see the `reply` construction below).
+  let gotFinalAnswer = false;
+  let failureReason = null; // set only if the LLM provider layer itself never responded usably
+  let providerUsed = null; // 'groq' | 'gemini' — for logging/route only, never shown to the user
 
   while (round < MAX_FUNCTION_CALL_ROUNDS) {
-    const result = await callGeminiWithTools({ contents, systemInstruction, tools, maxOutputTokens: 700, temperature: 0.5, timeoutMs: 15000 });
-    if (!result) break; // Gemini unavailable — fall through to the generic fallback below
+    const result = await callLlmWithTools({ contents, systemInstruction, tools, maxOutputTokens: 700, temperature: 0.5, timeoutMs: 20000 });
+    providerUsed = result.provider || providerUsed;
+
+    if (!result.ok) {
+      // Classified in llmProvider.service.js after trying both providers:
+      // 'timeout' | 'network' | 'gemini_4xx' | 'gemini_5xx' | 'rate_limited'
+      // | 'no_api_key' | 'unknown_error'. Full detail (including which
+      // provider failed how) already logged there; keep just the reason
+      // here so the fallback reply/route can reflect it.
+      failureReason = result.reason;
+      break; // both providers unavailable this turn — fall through to the fallback below
+    }
 
     if (!result.functionCalls?.length) {
       finalText = result.text;
+      gotFinalAnswer = true;
       break;
     }
 
@@ -189,12 +246,24 @@ export async function orchestrateChat({ userId, role, message, location = null, 
     round += 1;
   }
 
-  const reply = finalText
-    || (toolsUsed.length
+  // `gotFinalAnswer` (not `finalText` truthiness) is what actually
+  // distinguishes "the model answered, even if briefly" from "we never got
+  // a usable response" — a truthy-string check alone would wrongly treat a
+  // legitimate empty-string final answer as the generic tool-failure
+  // message below, even though nothing actually failed.
+  const reply = gotFinalAnswer
+    ? (finalText || "Here you go!") // model's own valid-but-empty answer gets a minimal, honest placeholder rather than a scary "trouble" message
+    : (toolsUsed.length
       ? "I found some information but had trouble putting together a reply — please try asking again."
-      : "I can't reach the assistant right now — try again in a moment.");
+      : buildFallbackReply(failureReason));
 
-  const route = toolsUsed.length ? (toolsUsed.length > 1 || classification.type === 'multi_tool' ? 'multi_tool' : 'api_or_db') : (kbChunks.length ? 'rag' : 'llm');
+  const route = failureReason
+    ? 'error'
+    : toolsUsed.length ? (toolsUsed.length > 1 || classification.type === 'multi_tool' ? 'multi_tool' : 'api_or_db') : (kbChunks.length ? 'rag' : 'llm');
+
+  if (providerUsed) {
+    console.log(`[llm.provider] turn completed provider=${providerUsed} route=${route} tool_calls=${toolsUsed.length}`);
+  }
 
   if (conversation) {
     await appendMessage(conversation.id, {
@@ -204,4 +273,15 @@ export async function orchestrateChat({ userId, role, message, location = null, 
   }
 
   return { reply, route, toolsUsed, sources: kbChunks };
+}
+
+// User-facing copy for a turn where Gemini itself never returned a usable
+// response. Kept generic/on-brand and free of internals (no status codes,
+// no stack traces) — `failureReason` still gets logged in full server-side
+// by callGeminiWithTools, this is only what the traveler sees.
+function buildFallbackReply(reason) {
+  if (reason === 'timeout') {
+    return "That took a little too long to answer — mind trying again?";
+  }
+  return "I can't reach the assistant right now — try again in a moment.";
 }

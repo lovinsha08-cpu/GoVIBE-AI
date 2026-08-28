@@ -125,6 +125,12 @@ export async function generateAssistantReply({ trip, stops, message, history }) 
     maxOutputTokens: 400,
     temperature: 0.5,
     timeoutMs: 10000,
+    // This is a short conversational turn (chat reply + at most one
+    // swap/reorder decision), not a task that needs deep reasoning — a
+    // low thinking level keeps replies fast and avoids the same
+    // default-medium-thinking latency that was timing out the general
+    // assistant (see ai.service.js callGeminiWithTools for the full story).
+    thinkingLevel: 'low',
   });
 
   if (!parsed || typeof parsed.reply !== 'string') return null;

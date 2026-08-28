@@ -51,7 +51,20 @@ export async function checkSupabaseConnection() {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(healthUrl, { signal: controller.signal }).finally(() => clearTimeout(timer));
+    // /auth/v1/ is a protected route — Supabase's gateway requires the
+    // `apikey` header on every request to it (this is true even for the
+    // health endpoint) and returns 401 without one, regardless of whether
+    // the project/keys are otherwise fine. The check below was previously
+    // sending no headers at all, so it *always* logged a 401 here even on
+    // a perfectly healthy project — which is why login (via supabase-js,
+    // which does send this header automatically) kept succeeding right
+    // next to this warning. Sending the key here makes the check actually
+    // mean something instead of being permanently red.
+    const apiKey = env.supabaseServiceRoleKey || env.supabaseAnonKey;
+    const res = await fetch(healthUrl, {
+      headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timer));
     if (res.ok) {
       console.log(`[supabase] Connected OK (${healthUrl})`);
     } else {

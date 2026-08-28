@@ -28,6 +28,14 @@ export const env = {
   // Lets the Gemini model be swapped (e.g. to a newer/cheaper release)
   // without a code change. See ai.service.js for the default.
   geminiModel: clean(process.env.GEMINI_MODEL),
+  // Groq (OpenAI-compatible) — currently used as an alternative LLM
+  // provider for the AI Agent's tool-calling loop (see
+  // itineraryAgent.service.js / env.agentLlmProvider) and, via
+  // groqAdapter.service.js, as an independently-callable provider behind
+  // the same interface orchestrator.service.js uses for Gemini. Not wired
+  // as an automatic fallback for the orchestrator yet.
+  groqApiKey: clean(process.env.GROQ_API_KEY),
+  groqModel: clean(process.env.GROQ_MODEL),
   corsOrigin: clean(process.env.CORS_ORIGIN) || 'http://localhost:5173',
   googlePlacesApiKey: clean(process.env.GOOGLE_PLACES_API_KEY),
   // How many top candidates PER CATEGORY get sent to Google Places (New)

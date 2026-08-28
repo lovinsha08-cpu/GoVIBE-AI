@@ -33,7 +33,7 @@ function capDataset(rows, limit) {
  * null — callers never need their own try/catch, and a bad Gemini response
  * never throws past this boundary.
  */
-export async function callGemini({ prompt, schema, maxOutputTokens = 2048, temperature = 0.4, timeoutMs = 12000 }) {
+export async function callGemini({ prompt, schema, maxOutputTokens = 2048, temperature = 0.4, timeoutMs = 12000, thinkingLevel = null }) {
   if (!env.geminiApiKey) return null;
 
   const body = {
@@ -43,6 +43,12 @@ export async function callGemini({ prompt, schema, maxOutputTokens = 2048, tempe
       temperature,
       maxOutputTokens,
       ...(schema ? { responseSchema: schema } : {}),
+      // Gemini 3.x models "think" before answering by default (thinkingLevel
+      // defaults to 'medium' server-side when unset). Left unset here so
+      // generateFullItinerary's default call keeps its existing quality —
+      // callers that want a faster/cheaper pass (short conversational
+      // replies) can opt in with e.g. thinkingLevel: 'low'.
+      ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
     },
   };
 
@@ -181,18 +187,37 @@ export function buildHeuristicTripSummary(trip, stops, { hiddenGemCount = 0, out
  * One turn of a Gemini function-calling conversation. `contents` is the
  * full running turn history in Gemini's { role, parts } shape. `tools` is
  * an array of function declarations (see assistantFunctions.service.js).
- * Returns { text, functionCalls, raw } — `functionCalls` is [] when the
- * model just answered directly. Resolves to null (never throws) on
- * failure, same contract as callGemini().
+ *
+ * Returns { ok: true, text, functionCalls, modelContent, raw } on success —
+ * `functionCalls` is [] when the model just answered directly. On failure
+ * returns { ok: false, reason, message } and NEVER throws. `reason` is one
+ * of: 'no_api_key' | 'timeout' | 'network' | 'gemini_4xx' | 'gemini_5xx' |
+ * 'rate_limited' | 'unknown_error' — callers can log/branch on it without
+ * treating every failure as "the assistant is unavailable".
+ *
+ * `thinkingLevel` defaults to 'low': Gemini 3.x models think before
+ * answering by default (server-side default is 'medium' when unset), and
+ * that default reasoning pass — especially with a full tool/function
+ * declaration list attached for the model to consider — was regularly
+ * pushing simple messages ("hello") past the timeout and surfacing as
+ * `Gemini tool call error: timeout/abort` even though Gemini itself was
+ * reachable and the API key was valid. This is an interactive chat path;
+ * 'low' trades a bit of reasoning depth for reliably fast, on-time replies.
+ * Callers can still pass a higher level for turns that need deeper
+ * reasoning.
  */
-export async function callGeminiWithTools({ contents, systemInstruction, tools, maxOutputTokens = 1024, temperature = 0.4, timeoutMs = 15000 }) {
-  if (!env.geminiApiKey) return null;
+export async function callGeminiWithTools({ contents, systemInstruction, tools, maxOutputTokens = 1024, temperature = 0.4, timeoutMs = 20000, thinkingLevel = 'low' }) {
+  if (!env.geminiApiKey) return { ok: false, reason: 'no_api_key', message: 'GEMINI_API_KEY is not configured' };
 
   const body = {
     contents,
     ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
     ...(tools?.length ? { tools: [{ functionDeclarations: tools }], toolConfig: { functionCallingConfig: { mode: 'AUTO' } } } : {}),
-    generationConfig: { temperature, maxOutputTokens },
+    generationConfig: {
+      temperature,
+      maxOutputTokens,
+      ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
+    },
   };
 
   const controller = new AbortController();
@@ -207,7 +232,8 @@ export async function callGeminiWithTools({ contents, systemInstruction, tools, 
     if (!res.ok) {
       const errorBody = await res.text().catch(() => '');
       console.error(`[ai.service] Gemini tool call failed: ${res.status} ${errorBody}`.trim());
-      return null;
+      const reason = res.status === 429 ? 'rate_limited' : res.status >= 500 ? 'gemini_5xx' : 'gemini_4xx';
+      return { ok: false, reason, status: res.status, message: errorBody };
     }
     const data = await res.json();
     // Thinking models (Gemini 3.x+) attach a `thoughtSignature` to each
@@ -223,10 +249,13 @@ export async function callGeminiWithTools({ contents, systemInstruction, tools, 
     // Reasoning-summary parts are marked `thought: true` — exclude them so
     // internal chain-of-thought never leaks into the user-facing reply.
     const text = parts.filter((p) => p.text && !p.thought).map((p) => p.text).join('\n').trim();
-    return { text, functionCalls, modelContent, raw: data };
+    return { ok: true, text, functionCalls, modelContent, raw: data };
   } catch (err) {
-    console.error('[ai.service] Gemini tool call error:', err.name === 'AbortError' ? 'timeout/abort' : err.message);
-    return null;
+    const isAbort = err.name === 'AbortError';
+    const isNetworkError = /ENOTFOUND|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|fetch failed/i.test(err.message || '');
+    const reason = isAbort ? 'timeout' : isNetworkError ? 'network' : 'unknown_error';
+    console.error(`[ai.service] Gemini tool call error: ${reason}${isAbort ? ` (>${timeoutMs}ms)` : ` — ${err.message}`}`);
+    return { ok: false, reason, message: err.message };
   } finally {
     clearTimeout(timeout);
   }
