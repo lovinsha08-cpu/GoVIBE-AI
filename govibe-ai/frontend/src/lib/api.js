@@ -131,6 +131,19 @@ export const api = {
     return request(`/places/autocomplete?${params.toString()}`, { signal });
   },
 
+  // Business onboarding (Phase 2) — public, pre-signup preview of whether
+  // a business name + GPS point matches a real place via Google Places.
+  // The same check is re-run authoritatively by the backend during
+  // businessSignup, so this is purely for showing the owner a preview
+  // before they submit. Returns { status, locationVerified, ownerVerified,
+  // distanceMeters, place, message } — never throws for expected outcomes
+  // (not found / too far / API unavailable), only for a malformed request.
+  verifyBusinessLocation: ({ businessName, category, latitude, longitude }) =>
+    request('/business-onboarding/verify-location', {
+      method: 'POST',
+      body: JSON.stringify({ businessName, category, latitude, longitude }),
+    }),
+
   // ---------- Offers & Deals ----------
   // Traveler-facing — public, no auth required. Returns every ACTIVE offer.
   getOffers: ({ category, businessName, discountType, minDiscount } = {}) => {
@@ -164,6 +177,41 @@ export function getCurrentLocation({ timeoutMs = 8000 } = {}) {
       (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
       () => resolve(null),
       { timeout: timeoutMs, maximumAge: 5 * 60 * 1000 }
+    );
+  });
+}
+
+// Used by Business Onboarding (Phase 2), where the caller needs to tell
+// "permission denied" apart from "position unavailable" apart from
+// "timed out" so it can show the right message/retry action — unlike
+// getCurrentLocation() above (used by traveler "near me" features), which
+// intentionally collapses all failure modes to `null` since those callers
+// just fall back silently. Resolves to { lat, lng, accuracyMeters } or
+// rejects with { code: 'permission_denied' | 'position_unavailable' |
+// 'timeout' | 'unsupported', message }.
+export function getPreciseLocation({ timeoutMs = 10000 } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      return reject({ code: 'unsupported', message: 'Your browser does not support location access.' });
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        accuracyMeters: pos.coords.accuracy ?? null,
+      }),
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          reject({ code: 'permission_denied', message: 'Location access was denied. Please allow location access and try again.' });
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          reject({ code: 'position_unavailable', message: 'Your current location could not be determined. Please try again or check your device\u2019s GPS/location settings.' });
+        } else if (err.code === err.TIMEOUT) {
+          reject({ code: 'timeout', message: 'Getting your location took too long. Please try again.' });
+        } else {
+          reject({ code: 'position_unavailable', message: 'Could not get your location. Please try again.' });
+        }
+      },
+      { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 }
     );
   });
 }

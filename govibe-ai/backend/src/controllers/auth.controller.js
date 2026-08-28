@@ -1,4 +1,15 @@
 import { supabase, supabaseAdmin } from '../config/supabase.js';
+import { verifyBusinessLocation } from '../services/businessVerification.service.js';
+
+// Real GPS coordinates are always within these ranges — anything outside
+// (or non-numeric) is treated as "no location supplied" rather than
+// crashing signup over it.
+function isValidCoordinate(lat, lng) {
+  return (
+    typeof lat === 'number' && Number.isFinite(lat) && lat >= -90 && lat <= 90 &&
+    typeof lng === 'number' && Number.isFinite(lng) && lng >= -180 && lng <= 180
+  );
+}
 
 // supabase.auth.signUp()/signInWithPassword() reject with a bare
 // "fetch failed" TypeError (or an AbortError from our fetch timeout, or a
@@ -73,12 +84,23 @@ export async function businessSignup(req, res, next) {
     const {
       email, password, businessName, businessModel,
       location, category, description, phone,
+      latitude, longitude, // optional — from the onboarding UI's GPS capture
     } = req.body;
 
     if (!email || !password || !businessName || !businessModel || !location || !category) {
       return res.status(400).json({
         error: 'email, password, businessName, businessModel, location, and category are required',
       });
+    }
+
+    // GPS is optional (a business can register without it and be verified
+    // later), but if it's present it must be well-formed — otherwise it's
+    // silently dropped rather than blocking the whole signup over it.
+    const lat = latitude != null ? Number(latitude) : null;
+    const lng = longitude != null ? Number(longitude) : null;
+    const hasCoords = lat != null && lng != null && isValidCoordinate(lat, lng);
+    if ((latitude != null || longitude != null) && !hasCoords) {
+      console.warn('[auth] businessSignup received malformed GPS coordinates — ignoring location for this signup.');
     }
 
     const { data, error } = await supabase.auth.signUp({
@@ -94,7 +116,17 @@ export async function businessSignup(req, res, next) {
       return res.status(400).json({ error: error.message });
     }
 
-    await supabaseAdmin.from('businesses').insert({
+    // Location verification is always re-run here, server-side, against
+    // whatever GPS the client sent — a client-supplied "verified" flag is
+    // never trusted. `owner_verified` is intentionally never set true by
+    // this flow; it's a separate manual review process (out of scope for
+    // this phase).
+    let locationResult = null;
+    if (hasCoords) {
+      locationResult = await verifyBusinessLocation({ businessName, category, latitude: lat, longitude: lng });
+    }
+
+    const { error: insertError } = await supabaseAdmin.from('businesses').insert({
       id: data.user.id,
       business_name: businessName,
       business_model: businessModel,
@@ -103,9 +135,37 @@ export async function businessSignup(req, res, next) {
       description: description || null,
       phone: phone || null,
       verified: false, // genuineness check happens separately, see services/businessVerification.js
+      latitude: hasCoords ? lat : null,
+      longitude: hasCoords ? lng : null,
+      address: locationResult?.place?.address || null,
+      google_place_id: locationResult?.place?.placeId || null,
+      location_verified: locationResult?.locationVerified || false,
+      owner_verified: false,
+      location_match_status: locationResult?.status || 'skipped',
+      location_distance_meters: locationResult?.distanceMeters ?? null,
+      location_verified_at: locationResult ? new Date().toISOString() : null,
+      place_details: locationResult?.place || null,
     });
 
-    res.status(201).json({ user: data.user, session: data.session });
+    if (insertError) {
+      console.error('[auth] businessSignup: businesses insert failed:', insertError.message);
+      return res.status(400).json({ error: insertError.message });
+    }
+
+    res.status(201).json({
+      user: data.user,
+      session: data.session,
+      location: locationResult
+        ? {
+            status: locationResult.status,
+            locationVerified: locationResult.locationVerified,
+            ownerVerified: false,
+            distanceMeters: locationResult.distanceMeters,
+            place: locationResult.place,
+            message: locationResult.message,
+          }
+        : null,
+    });
   } catch (err) {
     next(err);
   }

@@ -4,6 +4,7 @@ import { Store, Loader2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import AuthLayout from '../components/AuthLayout';
 import Field, { Select } from '../components/Field';
+import BusinessLocationVerify from '../components/BusinessLocationVerify';
 import { api } from '../lib/api';
 
 const MODES = { LOGIN: 'login', SIGNUP: 'signup' };
@@ -20,6 +21,12 @@ export default function BusinessAuth() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  // Set by BusinessLocationVerify when GPS is captured / verification runs.
+  // Not required to submit — a business can register without GPS and be
+  // verified later — but when present it's sent along with signup so the
+  // backend can (re-)run the authoritative check server-side.
+  const [locationCoords, setLocationCoords] = useState(null); // { latitude, longitude, accuracyMeters }
+  const [locationVerification, setLocationVerification] = useState(null);
   const navigate = useNavigate();
 
   const update = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
@@ -31,8 +38,17 @@ export default function BusinessAuth() {
     setLoading(true);
     try {
       if (mode === MODES.SIGNUP) {
-        await api.businessSignup(form);
-        setMessage('Registration submitted! Your listing will be reviewed before it goes live.');
+        const payload = {
+          ...form,
+          latitude: locationCoords?.latitude ?? null,
+          longitude: locationCoords?.longitude ?? null,
+        };
+        const res = await api.businessSignup(payload);
+        setMessage(
+          res.location?.locationVerified
+            ? 'Registration submitted! Your location was verified — your listing will still be reviewed before it goes live.'
+            : 'Registration submitted! Your listing will be reviewed before it goes live.'
+        );
         setMode(MODES.LOGIN);
       } else {
         const res = await api.login({ email: form.email, password: form.password });
@@ -97,6 +113,13 @@ export default function BusinessAuth() {
               <Field label="Location" required value={form.location} onChange={update('location')} placeholder="City, area" />
               <Field label="Phone" type="tel" value={form.phone} onChange={update('phone')} placeholder="+91 98765 43210" />
 
+              <BusinessLocationVerify
+                businessName={form.businessName}
+                category={form.category}
+                onLocationChange={(loc) => setLocationCoords(loc)}
+                onVerificationChange={(result) => setLocationVerification(result)}
+              />
+
               <label className="block mb-4">
                 <span className="block text-sm font-medium text-[#0C3B5E]/80 mb-1.5">Description</span>
                 <textarea
@@ -113,6 +136,12 @@ export default function BusinessAuth() {
 
           <Field label="Email" type="email" required value={form.email} onChange={update('email')} placeholder="business@example.com" />
           <Field label="Password" type="password" required value={form.password} onChange={update('password')} placeholder="••••••••" minLength={6} />
+
+          {mode === MODES.SIGNUP && locationVerification && !locationVerification.locationVerified && (
+            <p className="text-xs text-[#0C3B5E]/50 mb-4">
+              Note: {locationVerification.message} You can still submit — this doesn't block registration.
+            </p>
+          )}
 
           {error && <p className="text-sm text-red-500 mb-4">{error}</p>}
           {message && <p className="text-sm text-[#16A34A] mb-4">{message}</p>}
