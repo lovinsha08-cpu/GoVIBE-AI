@@ -1,11 +1,10 @@
 /**
- * Splits a total budget (INR) across food / transport / experience / accommodation.
+ * Budget helpers used by itinerary generation and the trip assistant.
  *
- * Base weights are adjusted by:
- * - needsAccommodation (zeroes that bucket out if false, redistributes)
- * - interest categories (e.g. "food" interest bumps food weight, "adventure" bumps experience)
- * - group composition (more people generally means more absolute spend, ratios stay similar,
- *   but kids/elderly nudge a little more toward comfort/experience over rock-bottom transport)
+ * Important product rule: GoVIBE may estimate food/transport/entry costs,
+ * but it must never present an unavailable live price (especially hotel
+ * pricing) as if it were known. Accommodation is therefore handled as an
+ * external price-check item by accommodation.service.js.
  */
 const BASE_WEIGHTS = {
   accommodation: 0.35,
@@ -24,6 +23,7 @@ const INTEREST_NUDGES = {
 };
 
 export function splitBudget({ totalBudgetInr, interests = [], needsAccommodation = true }) {
+  const budget = Math.max(0, Number(totalBudgetInr) || 0);
   let weights = { ...BASE_WEIGHTS };
 
   for (const interest of interests) {
@@ -42,38 +42,35 @@ export function splitBudget({ totalBudgetInr, interests = [], needsAccommodation
     weights.experience += freed * 0.3;
   }
 
-  // Clamp negatives, then renormalize to sum to 1
-  for (const key of Object.keys(weights)) {
-    weights[key] = Math.max(weights[key], 0.05);
-  }
+  for (const key of Object.keys(weights)) weights[key] = Math.max(weights[key], 0.05);
   const sum = Object.values(weights).reduce((a, b) => a + b, 0);
-  for (const key of Object.keys(weights)) {
-    weights[key] = weights[key] / sum;
-  }
+  for (const key of Object.keys(weights)) weights[key] /= sum;
 
-  const split = {};
-  for (const [key, weight] of Object.entries(weights)) {
-    split[key] = Math.round(totalBudgetInr * weight);
-  }
-
+  // Round every bucket but repair rounding drift so the displayed split
+  // always reconciles exactly to the stated budget.
+  const entries = Object.entries(weights);
+  const split = Object.fromEntries(entries.map(([key, weight]) => [key, Math.round(budget * weight)]));
+  const drift = budget - Object.values(split).reduce((a, b) => a + b, 0);
+  if (entries.length) split[entries[entries.length - 1][0]] += drift;
   return split;
 }
 
-/**
- * Estimates entry fee cost for a spot given the group composition.
- * Assumes kids under a threshold and elderly may get discounted/free entry —
- * this is a simplifying heuristic until real per-venue pricing rules are added.
- */
-export function estimateSpotEntryCost(spot, group) {
-  const { adults = 1, kids = 0, elderly = 0, speciallyAbled = 0 } = group;
-  const fee = Number(spot.entry_fee_inr) || 0;
+export function estimateSpotEntryCost(spot, group = {}) {
+  const adults = Math.max(0, Number(group.adults) || 0);
+  const kids = Math.max(0, Number(group.kids) || 0);
+  const elderly = Math.max(0, Number(group.elderly) || 0);
+  const speciallyAbled = Math.max(0, Number(group.specially_abled ?? group.speciallyAbled) || 0);
+  const fee = Math.max(0, Number(spot?.entry_fee_inr) || 0);
   if (fee === 0) return 0;
+
+  // This remains an estimate because venue-specific concession rules are not
+  // universally available. The returned field is therefore an estimate, not
+  // a claimed official ticket price.
   const fullPayers = adults;
-  const halfPayers = kids + elderly + speciallyAbled; // common concession pattern in India
+  const halfPayers = kids + elderly + speciallyAbled;
   return Math.round(fullPayers * fee + halfPayers * fee * 0.5);
 }
 
-/** Average per-meal cost per person by food preference, used for food budget estimates. */
 const AVG_MEAL_COST_INR = {
   veg: 200,
   non_veg: 300,
@@ -83,16 +80,18 @@ const AVG_MEAL_COST_INR = {
 };
 
 export function estimateMealCost(foodPreferences = [], groupSize = 1, mealsCount = 1) {
-  const prefs = foodPreferences.length ? foodPreferences : ['veg'];
+  const prefs = Array.isArray(foodPreferences) && foodPreferences.length ? foodPreferences : ['veg'];
+  const people = Math.max(1, Number(groupSize) || 1);
+  const meals = Math.max(0, Number(mealsCount) || 0);
   const avgCost = prefs.reduce((sum, p) => sum + (AVG_MEAL_COST_INR[p] || 250), 0) / prefs.length;
-  return Math.round(avgCost * groupSize * mealsCount);
+  return Math.round(avgCost * people * meals);
 }
 
 /**
- * Step 9 (Budget Validation): checks the itinerary's actual computed cost
- * (transport + food + entry fees + a small miscellaneous buffer) against
- * the traveler's stated total budget, rather than only ever showing a
- * pre-allocated split that may not reflect what got scheduled.
+ * Validate the costs that GoVIBE actually knows or estimates.
+ * Accommodation is intentionally NOT included here unless a real price has
+ * been supplied by an external booking/price source. A discovery result
+ * alone is never treated as a priced room.
  */
 export function validateBudget({
   totalBudgetInr,
@@ -100,15 +99,20 @@ export function validateBudget({
   foodCostInr = 0,
   entryFeesInr = 0,
   miscellaneousInr = null,
+  accommodationCostInr = null,
 }) {
-  const budget = Number(totalBudgetInr) || 0;
-  // A miscellaneous buffer (tips, incidentals, local transport top-ups) —
-  // default to 8% of the known costs if not supplied.
+  const budget = Math.max(0, Number(totalBudgetInr) || 0);
+  const transport = Math.max(0, Number(transportCostInr) || 0);
+  const food = Math.max(0, Number(foodCostInr) || 0);
+  const entry = Math.max(0, Number(entryFeesInr) || 0);
+  const accommodationKnown = accommodationCostInr != null && Number.isFinite(Number(accommodationCostInr));
+  const accommodation = accommodationKnown ? Math.max(0, Number(accommodationCostInr)) : 0;
+  const knownBase = transport + food + entry + accommodation;
   const misc = miscellaneousInr != null
-    ? miscellaneousInr
-    : Math.round((transportCostInr + foodCostInr + entryFeesInr) * 0.08);
+    ? Math.max(0, Number(miscellaneousInr) || 0)
+    : Math.round((transport + food + entry) * 0.08);
 
-  const totalEstimatedCostInr = Math.round(transportCostInr + foodCostInr + entryFeesInr + misc);
+  const totalEstimatedCostInr = Math.round(knownBase + misc);
   const withinBudget = budget === 0 ? true : totalEstimatedCostInr <= budget;
   const overageInr = withinBudget ? 0 : totalEstimatedCostInr - budget;
   const remainingInr = withinBudget ? budget - totalEstimatedCostInr : 0;
@@ -116,32 +120,25 @@ export function validateBudget({
   return {
     total_budget_inr: budget,
     breakdown: {
-      transport_inr: Math.round(transportCostInr),
-      food_inr: Math.round(foodCostInr),
-      entry_fees_inr: Math.round(entryFeesInr),
+      transport_inr: Math.round(transport),
+      food_inr: Math.round(food),
+      entry_fees_inr: Math.round(entry),
+      accommodation_inr: accommodationKnown ? Math.round(accommodation) : null,
       miscellaneous_inr: Math.round(misc),
     },
     total_estimated_cost_inr: totalEstimatedCostInr,
+    pricing_scope: accommodationKnown ? 'includes_external_accommodation_price' : 'known_estimated_trip_cost_excludes_live_accommodation_price',
     within_budget: withinBudget,
     overage_inr: overageInr,
     remaining_budget_inr: remainingInr,
   };
 }
 
-/**
- * Step 9 follow-up — Budget Feasibility: the auto-trim step in the
- * itinerary engine can only ever recover money by dropping *stops*
- * (entry fees, mostly). For a low budget relative to group size/duration,
- * food and transport alone — costs that exist even with ZERO attractions
- * on the itinerary — can already exceed the traveler's stated budget. In
- * that case trimming stops is pointless (it was previously the only
- * lever pulled, even when every stop had a ₹0 entry fee, which silently
- * did nothing) and the honest thing is to say so plainly, the same way
- * the Gemini prompt is instructed to when a budget is unrealistic.
- */
 export function checkBudgetFeasibility({ totalBudgetInr, transportCostInr = 0, foodCostInr = 0 }) {
-  const budget = Number(totalBudgetInr) || 0;
-  const bareMinimumInr = Math.round(transportCostInr + foodCostInr);
+  const budget = Math.max(0, Number(totalBudgetInr) || 0);
+  const transport = Math.max(0, Number(transportCostInr) || 0);
+  const food = Math.max(0, Number(foodCostInr) || 0);
+  const bareMinimumInr = Math.round(transport + food);
   if (budget === 0) return { feasible: true, bareMinimumInr, shortfallInr: 0 };
   const feasible = bareMinimumInr <= budget;
   return {
