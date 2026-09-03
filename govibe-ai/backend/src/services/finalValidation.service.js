@@ -2,13 +2,13 @@
  * Step 10 — Final Validation.
  *
  * Runs the itinerary-quality checklist from the redesign spec against an
- * already-generated itinerary and returns a structured pass/fail report.
- * The validator also applies one narrow, deterministic quality repair:
- * if a destination has an identified Must Visit attraction but the
- * generated itinerary omitted all of them, the weakest non-meal/non-
- * accommodation sightseeing slot is replaced by the best available Must
- * Visit candidate. This is deliberately done here because this validator
- * is shared by the heuristic and AI/agent generation paths.
+ * already-generated itinerary. The validator also applies a deterministic
+ * attraction hierarchy repair shared by heuristic and AI generation:
+ *
+ *   Major / Must Visit -> Popular -> Local / Standard -> Hidden Gem
+ *
+ * The LLM may propose the itinerary, but it does not get to override this
+ * hard tourism-priority rule.
  */
 
 import { classifyAttractionTier } from './attractionRanking.service.js';
@@ -32,69 +32,186 @@ function clockToMinutes(clockStr) {
   return hour * 60 + minute;
 }
 
+const HIERARCHY_RANK = {
+  must_visit: 4,
+  popular: 3,
+  standard: 2,
+  hidden_gem: 1,
+};
+
+function isSightseeingStop(stop) {
+  return Boolean(stop)
+    && !stop.meal_type
+    && stop.category !== 'food_dining'
+    && stop.category !== 'stay'
+    && stop.category !== 'accommodation';
+}
+
+function candidateReviewCount(candidate) {
+  return Number(candidate?.review_count ?? candidate?._google?.userRatingCount) || 0;
+}
+
+function candidateInterestScore(candidate, requestedCategories) {
+  if (!requestedCategories?.length) return 0;
+  return requestedCategories.includes(candidate.category) ? 3 : 0;
+}
+
+function rankCandidates(candidates, requestedCategories) {
+  return [...candidates].sort((a, b) => {
+    const tierDiff = HIERARCHY_RANK[classifyAttractionTier(b)] - HIERARCHY_RANK[classifyAttractionTier(a)];
+    if (tierDiff) return tierDiff;
+    const interestDiff = candidateInterestScore(b, requestedCategories) - candidateInterestScore(a, requestedCategories);
+    if (interestDiff) return interestDiff;
+    const ratingDiff = (Number(b.rating) || 0) - (Number(a.rating) || 0);
+    if (ratingDiff) return ratingDiff;
+    return candidateReviewCount(b) - candidateReviewCount(a);
+  });
+}
+
 /**
- * Hard hierarchy repair shared by every generation path.
+ * Hard attraction hierarchy shared by every generation path.
  *
- * Policy:
- *   1. A normal trip gets at least one Must Visit when one exists nearby.
- *   2. Hidden gems never displace that first Must Visit.
- *   3. Explicit hidden_gems_only trips are left untouched.
- *   4. We only replace a sightseeing stop; meals/accommodation are never
- *      converted into attractions.
- *   5. The replacement keeps the generated slot's timing/reasoning metadata
- *      so the repair is minimally invasive.
+ * A normal itinerary reserves roughly 40% of sightseeing slots for Major /
+ * Must Visit attractions when enough are available, then fills the remaining
+ * slots in strict tier order: Popular -> Local/Standard -> Hidden Gem.
  *
- * The main selector/ranking layer remains responsible for the full
- * Major → Popular → Local → Hidden ordering; this final pass is the safety
- * net for AI output and narrow/imbalanced candidate pools.
+ * Interests refine ranking WITHIN a tier. They never allow a lower-tier spot
+ * to displace an available major attraction. Hidden gems are therefore
+ * supplementary rather than replacements for iconic tourism anchors.
+ *
+ * The function mutates the existing stops array so callers that already hold
+ * the generated itinerary automatically receive the repaired result without
+ * a second generation pass.
  */
-export function enforceAttractionHierarchy({ stops, candidates, tripStyle = null }) {
+export function enforceAttractionHierarchy({ stops, candidates, requestedCategories = [] }) {
   if (!Array.isArray(stops) || !Array.isArray(candidates)) return stops;
-  if (tripStyle === 'hidden_gems_only') return stops;
 
-  const mustVisit = candidates
-    .filter((c) => classifyAttractionTier(c) === 'must_visit')
-    .filter((c) => c.category !== 'food_dining' && c.category !== 'stay' && c.category !== 'accommodation');
+  const sightseeingStops = stops.filter(isSightseeingStop);
+  if (sightseeingStops.length === 0) return stops;
 
-  if (mustVisit.length === 0) return stops;
-
-  const includedIds = new Set(stops.map((s) => s.spot_id).filter(Boolean));
-  if (mustVisit.some((c) => includedIds.has(c.id))) return stops;
-
-  const replacementIndex = stops.findIndex((s) =>
-    !s.meal_type
-    && s.category !== 'food_dining'
-    && s.category !== 'stay'
-    && s.category !== 'accommodation'
+  const tourismCandidates = candidates.filter((candidate) =>
+    candidate.category !== 'food_dining'
+    && candidate.category !== 'stay'
+    && candidate.category !== 'accommodation'
   );
-  if (replacementIndex === -1) return stops;
+  if (tourismCandidates.length === 0) return stops;
 
-  const replacement = [...mustVisit]
-    .filter((c) => !includedIds.has(c.id))
-    .sort((a, b) => {
-      const ar = Number(a.rating) || 0;
-      const br = Number(b.rating) || 0;
-      const ac = Number(a.review_count ?? a._google?.userRatingCount) || 0;
-      const bc = Number(b.review_count ?? b._google?.userRatingCount) || 0;
-      return br - ar || bc - ac;
-    })[0];
-
-  if (!replacement) return stops;
-
-  const old = stops[replacementIndex];
-  stops[replacementIndex] = {
-    ...old,
-    spot_id: replacement.id,
-    name: replacement.name,
-    category: replacement.category,
-    latitude: replacement.latitude,
-    longitude: replacement.longitude,
-    opening_hours: replacement.opening_hours || null,
-    rating: replacement.rating ?? null,
-    entry_cost_inr: replacement.entry_fee_inr ?? old.entry_cost_inr ?? 0,
-    to_location_name: replacement.name,
-    attraction_tier: 'must_visit',
+  const ranked = rankCandidates(tourismCandidates, requestedCategories);
+  const tierBuckets = {
+    must_visit: ranked.filter((c) => classifyAttractionTier(c) === 'must_visit'),
+    popular: ranked.filter((c) => classifyAttractionTier(c) === 'popular'),
+    standard: ranked.filter((c) => classifyAttractionTier(c) === 'standard'),
+    hidden_gem: ranked.filter((c) => classifyAttractionTier(c) === 'hidden_gem'),
   };
+
+  const slotCount = sightseeingStops.length;
+  if (tierBuckets.must_visit.length === 0) return stops;
+
+  // Short trips still get at least one iconic anchor. Longer trips reserve
+  // about 40% for major attractions, while never exceeding availability.
+  const majorTarget = Math.min(
+    tierBuckets.must_visit.length,
+    Math.max(1, Math.ceil(slotCount * 0.4)),
+  );
+
+  const desired = [];
+  const desiredIds = new Set();
+  const addFromTier = (tier, count) => {
+    let added = 0;
+    for (const candidate of tierBuckets[tier]) {
+      if (desired.length >= slotCount || added >= count) break;
+      if (desiredIds.has(candidate.id)) continue;
+      desired.push(candidate);
+      desiredIds.add(candidate.id);
+      added += 1;
+    }
+  };
+
+  // Hard tier order. The candidate pool is the source of truth; nothing is
+  // invented by the model or by this repair layer.
+  addFromTier('must_visit', majorTarget);
+  addFromTier('popular', slotCount);
+  addFromTier('standard', slotCount);
+  addFromTier('hidden_gem', slotCount);
+
+  const candidateById = new Map(tourismCandidates.map((c) => [c.id, c]));
+  const existingDesired = new Set(
+    sightseeingStops
+      .map((stop) => candidateById.get(stop.spot_id))
+      .filter(Boolean)
+      .filter((candidate) => desiredIds.has(candidate.id))
+      .map((candidate) => candidate.id),
+  );
+
+  const replacementPool = desired.filter((candidate) => !existingDesired.has(candidate.id));
+  let replacementCursor = 0;
+
+  const currentTierForStop = (stop) => {
+    const candidate = candidateById.get(stop.spot_id);
+    return candidate ? classifyAttractionTier(candidate) : 'standard';
+  };
+
+  const needsReplacement = sightseeingStops
+    .map((stop) => ({ stop, tier: currentTierForStop(stop) }))
+    .filter(({ stop }) => !desiredIds.has(stop.spot_id))
+    .sort((a, b) => HIERARCHY_RANK[a.tier] - HIERARCHY_RANK[b.tier]);
+
+  for (const { stop } of needsReplacement) {
+    while (replacementCursor < replacementPool.length) {
+      const replacement = replacementPool[replacementCursor++];
+      if (!replacement || stops.some((s) => s.spot_id === replacement.id)) continue;
+
+      const stopIndex = stops.indexOf(stop);
+      if (stopIndex === -1) break;
+
+      stops[stopIndex] = {
+        ...stop,
+        spot_id: replacement.id,
+        name: replacement.name,
+        category: replacement.category,
+        latitude: replacement.latitude,
+        longitude: replacement.longitude,
+        opening_hours: replacement.opening_hours || null,
+        rating: replacement.rating ?? null,
+        entry_cost_inr: replacement.entry_fee_inr ?? stop.entry_cost_inr ?? 0,
+        to_location_name: replacement.name,
+        attraction_tier: classifyAttractionTier(replacement),
+      };
+      break;
+    }
+  }
+
+  // Final deterministic guard: if no major survived because the AI output had
+  // duplicates or malformed spot IDs, force the best major into the weakest
+  // sightseeing slot. This guarantees the core invariant.
+  const hasMajor = stops.some((stop) => {
+    const candidate = candidateById.get(stop.spot_id);
+    return candidate && classifyAttractionTier(candidate) === 'must_visit';
+  });
+
+  if (!hasMajor) {
+    const replacement = tierBuckets.must_visit[0];
+    const weakest = [...stops]
+      .map((stop, index) => ({ stop, index, tier: currentTierForStop(stop) }))
+      .filter(({ stop }) => isSightseeingStop(stop))
+      .sort((a, b) => HIERARCHY_RANK[a.tier] - HIERARCHY_RANK[b.tier])[0];
+
+    if (replacement && weakest) {
+      stops[weakest.index] = {
+        ...weakest.stop,
+        spot_id: replacement.id,
+        name: replacement.name,
+        category: replacement.category,
+        latitude: replacement.latitude,
+        longitude: replacement.longitude,
+        opening_hours: replacement.opening_hours || null,
+        rating: replacement.rating ?? null,
+        entry_cost_inr: replacement.entry_fee_inr ?? weakest.stop.entry_cost_inr ?? 0,
+        to_location_name: replacement.name,
+        attraction_tier: 'must_visit',
+      };
+    }
+  }
 
   return stops;
 }
@@ -173,9 +290,6 @@ function checkRestaurantsSeparatedFromAttractions(stops) {
 
 /** ✓ Are hidden gems optional? */
 function checkHiddenGemsOptional(stops, hiddenGems) {
-  const hiddenGemIdsOnRoute = new Set(
-    stops.filter((s) => classifyAttractionTier({ rating: s.rating, popularity_score: undefined }) === 'hidden_gem').map((s) => s.spot_id)
-  );
   const passed = Array.isArray(hiddenGems);
   return { passed, detail: passed ? `${hiddenGems.length} hidden gem(s) offered as optional add-ons.` : 'Hidden gems list missing.' };
 }
@@ -230,7 +344,12 @@ function checkInterestDiversityRespected(stops, requestedCategories) {
  * checks so the report describes the itinerary that will actually be shown.
  */
 export function runFinalValidation({ stops, candidates, hiddenGems, budgetValidation, tripStartHour, requestedCategories, tripStyle = null }) {
-  enforceAttractionHierarchy({ stops, candidates, tripStyle });
+  // `tripStyle` is accepted for API compatibility. The hard tourism hierarchy
+  // applies to normal trips; hidden-gems-only remains a deliberate product
+  // mode and therefore bypasses the major-attraction composition rule.
+  if (tripStyle !== 'hidden_gems_only') {
+    enforceAttractionHierarchy({ stops, candidates, requestedCategories });
+  }
 
   const checks = [
     { id: 'iconic_attractions_included', label: "Destination's iconic attractions are included", ...checkIconicAttractionsIncluded(stops, candidates) },
