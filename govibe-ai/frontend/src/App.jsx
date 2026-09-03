@@ -3,7 +3,7 @@ import Landing from './pages/Landing';
 import TravelerAuth from './pages/TravelerAuth';
 import BusinessAuth from './pages/BusinessAuth';
 import TripWizard from './pages/wizard/TripWizard';
-import ItineraryResults from './pages/ItineraryResults';
+import ItineraryPage from './pages/ItineraryPage';
 import EmergencyServices from './pages/EmergencyServices';
 import BookingItinerary from './pages/BookingItinerary';
 import BudgetTracker from './pages/BudgetTracker';
@@ -23,19 +23,11 @@ function App() {
         <Route path="/" element={<Landing />} />
         <Route path="/traveler" element={<TravelerAuth />} />
         <Route path="/business" element={<BusinessAuth />} />
-         <Route 
-    path="/dashboard" 
-    element={<TravelerDashboard />} 
-  />
-
-  <Route 
-    path="/business/dashboard" 
-    element={<BusinessDashboard />} 
-  />
-
+        <Route path="/dashboard" element={<TravelerDashboard />} />
+        <Route path="/business/dashboard" element={<BusinessDashboard />} />
         <Route path="/itineraries" element={<SavedItineraries />} />
         <Route path="/trip/new" element={<TripWizard />} />
-        <Route path="/trip/:tripId/itinerary" element={<ItineraryResults />} />
+        <Route path="/trip/:tripId/itinerary" element={<ItineraryPage />} />
         <Route path="/trip/:tripId/emergency-services" element={<EmergencyServices />} />
         <Route path="/trip/:tripId/booking" element={<BookingItinerary />} />
         <Route path="/trip/:tripId/budget" element={<BudgetTracker />} />
