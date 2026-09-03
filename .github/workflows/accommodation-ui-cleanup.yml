@@ -1,0 +1,56 @@
+name: Accommodation UI cleanup
+
+on:
+  push:
+    branches: [fix/itinerary-attraction-hierarchy]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: ${{ !contains(github.event.head_commit.message, '[accom-ui]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove invented accommodation pricing
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('govibe-ai/frontend/src/pages/ItineraryResults.jsx')
+          s = p.read_text()
+          old = '''          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#0C3B5E]/70 mb-2">\n            <span className="flex items-center gap-1">\n              <IndianRupee size={11} /> ~₹{accommodation.price_per_night_inr?.toLocaleString('en-IN')}/night\n            </span>\n            {accommodation.distance_km_from_center != null && (\n              <span>{accommodation.distance_km_from_center} km from destination center</span>\n            )}\n            <span>Check-in {accommodation.check_in_time} · Check-out {accommodation.check_out_time}</span>\n          </div>'''
+          new = '''          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#0C3B5E]/70 mb-2">\n            <span className="font-semibold text-[#0C3B5E]">Current price · check live price for your dates</span>\n            {accommodation.distance_km_from_center != null && (\n              <span>{accommodation.distance_km_from_center} km from destination center</span>\n            )}\n            <span>Check-in {accommodation.check_in_time} · Check-out {accommodation.check_out_time}</span>\n          </div>'''
+          if old not in s:
+              raise SystemExit('Expected ItineraryResults pricing block not found')
+          s = s.replace(old, new, 1)
+          old_note = '''          {accommodation.price_estimate_note && (\n            <p className="text-[10px] text-[#0C3B5E]/35 mt-2">{accommodation.price_estimate_note}</p>\n          )}\n'''
+          s = s.replace(old_note, '', 1)
+          old_actions = '''          <div className="flex items-center gap-3">\n            {accommodation.maps_url && ('''
+          new_actions = '''          <div className="flex flex-wrap items-center gap-2">\n            {accommodation.price_check_url && (\n              <a href={accommodation.price_check_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-[#0C3B5E] rounded-lg px-3 py-2">\n                Check Current Price <ExternalLink size={11} />\n              </a>\n            )}\n            {accommodation.website_url && (\n              <a href={accommodation.website_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2563EB] border border-[#2563EB]/20 rounded-lg px-3 py-2">\n                Hotel Website <ExternalLink size={11} />\n              </a>\n            )}\n            {accommodation.maps_url && ('''
+          if old_actions not in s:
+              raise SystemExit('Expected ItineraryResults actions block not found')
+          s = s.replace(old_actions, new_actions, 1)
+          p.write_text(s)
+
+          # BookingItinerary has its own accommodation card. Remove any estimated
+          # nightly/total stay amounts and keep only live-price/deeplink actions.
+          p = Path('govibe-ai/frontend/src/pages/BookingItinerary.jsx')
+          s = p.read_text()
+          s = re.sub(r'''\s*<[^>]*>[^<]*estimated[^<]*</[^>]*>''', '', s, flags=re.I)
+          s = s.replace('~₹{accommodation.price_per_night_inr?.toLocaleString(\'en-IN\')}/night', 'Current price · check live price for your dates')
+          s = re.sub(r'''\{accommodation\.price_estimate_note\s*&&\s*\([\s\S]*?\)\}''', '', s, count=1)
+          p.write_text(s)
+          PY
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            exit 0
+          fi
+          git add govibe-ai/frontend/src/pages/ItineraryResults.jsx govibe-ai/frontend/src/pages/BookingItinerary.jsx
+          git commit -m "[accom-ui] use live accommodation price links"
+          git push
