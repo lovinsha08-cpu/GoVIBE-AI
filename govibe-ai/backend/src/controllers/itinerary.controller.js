@@ -1,6 +1,7 @@
 import { supabaseAdmin } from '../config/supabase.js';
 import { generateItinerary, regenerateStop } from '../services/itineraryEngine.service.js';
 import { buildItineraryPdfBuffer } from '../services/pdfExport.service.js';
+import { searchItineraryReplacementPlaces, replaceItineraryStop } from '../services/itineraryEditing.service.js';
 
 // POST /api/itinerary/generate  { trip_id }
 export async function generate(req, res, next) {
@@ -85,6 +86,93 @@ export async function regenerate(req, res, next) {
     if (updateError) return res.status(400).json({ error: updateError.message });
 
     res.json({ itinerary: updated, replacedStop, previousStopName });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/itinerary/:tripId/places/search?q=...
+// Searches places specifically for the currently generated itinerary so the
+// traveler can manually choose a replacement. Google Places is preferred
+// when configured; GoVIBE's curated destination data is always used as a
+// second source.
+export async function searchReplacementPlaces(req, res, next) {
+  try {
+    const { tripId } = req.params;
+    const query = String(req.query.q || '').trim();
+    if (query.length < 2) return res.status(400).json({ error: 'Search query must contain at least 2 characters.' });
+
+    const { data: trip, error: tripError } = await supabaseAdmin
+      .from('trips')
+      .select('*')
+      .eq('id', tripId)
+      .eq('traveler_id', req.user.id)
+      .single();
+    if (tripError || !trip) return res.status(404).json({ error: 'Trip not found' });
+
+    const { data: itinerary, error: itinError } = await supabaseAdmin
+      .from('itineraries')
+      .select('stops')
+      .eq('trip_id', tripId)
+      .order('version', { ascending: false })
+      .limit(1)
+      .single();
+    if (itinError || !itinerary) return res.status(404).json({ error: 'No itinerary found for this trip' });
+
+    const places = await searchItineraryReplacementPlaces(trip, query, itinerary.stops || []);
+    res.json({ places });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/itinerary/:tripId/stop/:stopOrder/replace
+// Body: { place: { name, latitude, longitude, ... } }
+export async function replace(req, res, next) {
+  try {
+    const { tripId } = req.params;
+    const stopOrder = parseInt(req.params.stopOrder, 10);
+    if (!Number.isFinite(stopOrder)) return res.status(400).json({ error: 'stopOrder must be a number' });
+    if (!req.body?.place) return res.status(400).json({ error: 'place is required' });
+
+    const { data: trip, error: tripError } = await supabaseAdmin
+      .from('trips')
+      .select('*')
+      .eq('id', tripId)
+      .eq('traveler_id', req.user.id)
+      .single();
+    if (tripError || !trip) return res.status(404).json({ error: 'Trip not found' });
+
+    const { data: itinerary, error: itinError } = await supabaseAdmin
+      .from('itineraries')
+      .select('*')
+      .eq('trip_id', tripId)
+      .order('version', { ascending: false })
+      .limit(1)
+      .single();
+    if (itinError || !itinerary) return res.status(404).json({ error: 'No itinerary found for this trip' });
+
+    const result = await replaceItineraryStop(trip, itinerary, stopOrder, req.body.place);
+
+    const { data: updated, error: updateError } = await supabaseAdmin
+      .from('itineraries')
+      .update({
+        stops: result.stops,
+        budget_summary: result.budgetSummary,
+        total_distance_km: result.totalDistanceKm,
+        total_duration_minutes: result.totalDurationMinutes,
+      })
+      .eq('id', itinerary.id)
+      .select()
+      .single();
+    if (updateError) return res.status(400).json({ error: updateError.message });
+
+    res.json({
+      itinerary: updated,
+      replacedStop: result.replacedStop,
+      previousStopName: result.previousStopName,
+      routeRecalculated: true,
+    });
   } catch (err) {
     next(err);
   }
