@@ -17,9 +17,6 @@ async function request(path, options = {}) {
       ...options,
     });
   } catch (networkErr) {
-    // The browser's fetch() throws a bare "Failed to fetch" TypeError when it
-    // can't even reach the server (backend down, wrong port/URL, or blocked
-    // by CORS). Surface something actionable instead of that generic message.
     throw new Error(
       `Can't reach the GoVIBE backend at ${BASE_URL}. Make sure the backend server is running (cd backend && npm run dev) and that VITE_API_URL points at the right port.`
     );
@@ -32,17 +29,12 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  travelerSignup: (payload) =>
-    request('/auth/traveler/signup', { method: 'POST', body: JSON.stringify(payload) }),
-  businessSignup: (payload) =>
-    request('/auth/business/signup', { method: 'POST', body: JSON.stringify(payload) }),
-  login: (payload) =>
-    request('/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
-  forgotPassword: (payload) =>
-    request('/auth/forgot-password', { method: 'POST', body: JSON.stringify(payload) }),
+  travelerSignup: (payload) => request('/auth/traveler/signup', { method: 'POST', body: JSON.stringify(payload) }),
+  businessSignup: (payload) => request('/auth/business/signup', { method: 'POST', body: JSON.stringify(payload) }),
+  login: (payload) => request('/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
+  forgotPassword: (payload) => request('/auth/forgot-password', { method: 'POST', body: JSON.stringify(payload) }),
 
-  createTrip: (payload) =>
-    request('/trips', { method: 'POST', body: JSON.stringify(payload) }),
+  createTrip: (payload) => request('/trips', { method: 'POST', body: JSON.stringify(payload) }),
   getTrip: (id) => request(`/trips/${id}`),
   listTrips: ({ q, sort, minBudget, maxBudget, startDate, endDate } = {}) => {
     const params = new URLSearchParams();
@@ -57,36 +49,26 @@ export const api = {
   },
   deleteTrip: (id) => request(`/trips/${id}`, { method: 'DELETE' }),
 
-  generateItinerary: (tripId) =>
-    request('/itinerary/generate', { method: 'POST', body: JSON.stringify({ trip_id: tripId }) }),
+  generateItinerary: (tripId) => request('/itinerary/generate', { method: 'POST', body: JSON.stringify({ trip_id: tripId }) }),
   getLatestItinerary: (tripId) => request(`/itinerary/${tripId}/latest`),
-  regenerateStop: (tripId, stopOrder) =>
-    request(`/itinerary/${tripId}/stop/${stopOrder}/regenerate`, { method: 'POST' }),
+  regenerateStop: (tripId, stopOrder) => request(`/itinerary/${tripId}/stop/${stopOrder}/regenerate`, { method: 'POST' }),
+  searchItineraryPlaces: (tripId, query) => {
+    const params = new URLSearchParams({ q: query });
+    return request(`/itinerary/${tripId}/places/search?${params.toString()}`);
+  },
+  replaceItineraryStop: (tripId, stopOrder, place) =>
+    request(`/itinerary/${tripId}/stop/${stopOrder}/replace`, {
+      method: 'POST',
+      body: JSON.stringify({ place }),
+    }),
 
-  // AI trip assistant chat — ask it to reorder a day, swap a spot, or
-  // explain why a place was picked. `history` is the recent turns of this
-  // chat session ([{ role: 'user'|'assistant', content }]) so the assistant
-  // has short context; for trip-scoped chats it's kept in memory only.
-  // For the general assistant (no tripId), the backend now persists
-  // conversation history itself (see getAssistantHistory below), so
-  // `history` is optional there. `location` is an optional { lat, lng }
-  // from the browser's geolocation — used for "near me"/emergency queries.
-  // `mode` is UI-only (controls the widget's copy/greeting) and isn't part
-  // of the backend contract, so it's intentionally not sent.
   assistantChat: ({ tripId, message, history = [], location = null }) =>
     request('/assistant/chat', {
       method: 'POST',
       body: JSON.stringify({ trip_id: tripId, message, history, location }),
     }),
-
-  // Restores the general assistant's persisted conversation (requirement:
-  // "conversation history" survives a reload). Trip-scoped chats stay
-  // session-only by design.
   getAssistantHistory: () => request('/assistant/history'),
 
-  // Live categorized "Emergency Services" (hospitals/clinics/police/pharmacies)
-  // around the trip's destination — or around lat/lng if the caller has a
-  // more specific anchor (e.g. current GPS position or a selected stop).
   getEmergencyServices: (tripId, { lat, lng, anchorName } = {}) => {
     const params = new URLSearchParams();
     if (lat != null) params.set('lat', String(lat));
@@ -96,8 +78,6 @@ export const api = {
     return request(`/trips/${tripId}/emergency${qs ? `?${qs}` : ''}`);
   },
 
-  // Binary response — bypasses request()'s JSON parsing. Returns a Blob
-  // plus the filename the server suggested via Content-Disposition.
   downloadItineraryPdf: async (tripId) => {
     const res = await fetch(`${BASE_URL}/itinerary/${tripId}/download`, { headers: getAuthHeaders() });
     if (!res.ok) {
@@ -124,28 +104,18 @@ export const api = {
   getSpotCategories: () => request('/spots/categories'),
   getHiddenGemCategories: () => request('/spots/hidden-gem-categories'),
 
-  // Powers LocationAutocomplete — returns { suggestions: [...] }.
   autocompletePlaces: (query, { limit, signal } = {}) => {
     const params = new URLSearchParams({ q: query });
     if (limit) params.set('limit', String(limit));
     return request(`/places/autocomplete?${params.toString()}`, { signal });
   },
 
-  // Business onboarding (Phase 2) — public, pre-signup preview of whether
-  // a business name + GPS point matches a real place via Google Places.
-  // The same check is re-run authoritatively by the backend during
-  // businessSignup, so this is purely for showing the owner a preview
-  // before they submit. Returns { status, locationVerified, ownerVerified,
-  // distanceMeters, place, message } — never throws for expected outcomes
-  // (not found / too far / API unavailable), only for a malformed request.
   verifyBusinessLocation: ({ businessName, category, latitude, longitude }) =>
     request('/business-onboarding/verify-location', {
       method: 'POST',
       body: JSON.stringify({ businessName, category, latitude, longitude }),
     }),
 
-  // ---------- Offers & Deals ----------
-  // Traveler-facing — public, no auth required. Returns every ACTIVE offer.
   getOffers: ({ category, businessName, discountType, minDiscount } = {}) => {
     const params = new URLSearchParams();
     if (category) params.set('category', category);
@@ -155,21 +125,13 @@ export const api = {
     const qs = params.toString();
     return request(`/offers${qs ? `?${qs}` : ''}`);
   },
-
-  // Business-facing — authenticated, scoped to the logged-in business.
   getMyOffers: () => request('/business/offers'),
   createOffer: (payload) => request('/business/offers', { method: 'POST', body: JSON.stringify(payload) }),
   updateOffer: (id, payload) => request(`/business/offers/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
-  setOfferStatus: (id, isActive) =>
-    request(`/business/offers/${id}/status`, { method: 'PATCH', body: JSON.stringify({ isActive }) }),
+  setOfferStatus: (id, isActive) => request(`/business/offers/${id}/status`, { method: 'PATCH', body: JSON.stringify({ isActive }) }),
   deleteOffer: (id) => request(`/business/offers/${id}`, { method: 'DELETE' }),
 };
 
-// Lazily asks the browser for the user's current position (only called when
-// a query actually needs it, e.g. "juice shop near me" or emergency
-// services) — never requested on page load. Resolves to { lat, lng } or
-// null if permission is denied/unavailable, so callers always have a safe
-// fallback rather than an unhandled rejection.
 export function getCurrentLocation({ timeoutMs = 8000 } = {}) {
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
@@ -181,44 +143,24 @@ export function getCurrentLocation({ timeoutMs = 8000 } = {}) {
   });
 }
 
-// Used by Business Onboarding (Phase 2), where the caller needs to tell
-// "permission denied" apart from "position unavailable" apart from
-// "timed out" so it can show the right message/retry action — unlike
-// getCurrentLocation() above (used by traveler "near me" features), which
-// intentionally collapses all failure modes to `null` since those callers
-// just fall back silently. Resolves to { lat, lng, accuracyMeters } or
-// rejects with { code: 'permission_denied' | 'position_unavailable' |
-// 'timeout' | 'unsupported', message }.
 export function getPreciseLocation({ timeoutMs = 10000 } = {}) {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
       return reject({ code: 'unsupported', message: 'Your browser does not support location access.' });
     }
     navigator.geolocation.getCurrentPosition(
-      (pos) => resolve({
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude,
-        accuracyMeters: pos.coords.accuracy ?? null,
-      }),
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracyMeters: pos.coords.accuracy ?? null }),
       (err) => {
-        if (err.code === err.PERMISSION_DENIED) {
-          reject({ code: 'permission_denied', message: 'Location access was denied. Please allow location access and try again.' });
-        } else if (err.code === err.POSITION_UNAVAILABLE) {
-          reject({ code: 'position_unavailable', message: 'Your current location could not be determined. Please try again or check your device\u2019s GPS/location settings.' });
-        } else if (err.code === err.TIMEOUT) {
-          reject({ code: 'timeout', message: 'Getting your location took too long. Please try again.' });
-        } else {
-          reject({ code: 'position_unavailable', message: 'Could not get your location. Please try again.' });
-        }
+        if (err.code === err.PERMISSION_DENIED) reject({ code: 'permission_denied', message: 'Location access was denied. Please allow location access and try again.' });
+        else if (err.code === err.POSITION_UNAVAILABLE) reject({ code: 'position_unavailable', message: 'Your current location could not be determined. Please try again or check your device’s GPS/location settings.' });
+        else if (err.code === err.TIMEOUT) reject({ code: 'timeout', message: 'Getting your location took too long. Please try again.' });
+        else reject({ code: 'position_unavailable', message: 'Could not get your location. Please try again.' });
       },
       { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 0 }
     );
   });
 }
 
-// Quick heuristic used by the chat UI to decide whether a message likely
-// needs the user's location before sending (so we only prompt for
-// geolocation permission when it's actually relevant).
 export function messageNeedsLocation(text) {
   return /\b(near me|nearby|around me|close by|current location)\b/i.test(text);
 }
