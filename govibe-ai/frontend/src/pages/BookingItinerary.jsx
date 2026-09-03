@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import {
   Compass, Loader2, ArrowLeft, ExternalLink, Bus, Car, Train, TrainFront,
   Ship, Bike, Footprints, Ticket, UtensilsCrossed, Hotel, IndianRupee, Wallet,
+  Search, MapPinned, Star, CalendarDays,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useBudgetExpenses } from '../lib/useBudgetExpenses';
@@ -15,7 +16,6 @@ const TYPE_META = {
   hotel_booking: { icon: Hotel, label: 'Hotel' },
 };
 
-/** Maps a bookable item's type to the Live Budget Tracker category it should fall under. */
 const CATEGORY_BY_TYPE = {
   transport: 'Travel',
   attraction_entry: 'Experience',
@@ -23,7 +23,6 @@ const CATEGORY_BY_TYPE = {
   hotel_booking: 'Accommodation',
 };
 
-/** Stable id for a booking item's expense record — same item, same id, every render. */
 function expenseIdFor(tripId, item, index) {
   return `itinerary-${tripId}-${index}-${item.type}`;
 }
@@ -33,14 +32,6 @@ const MODE_ICON = {
   metro: TrainFront, local_bus: Bus, train: Train, ferry: Ship,
 };
 
-/**
- * Booking Itinerary — a centralized dashboard of every bookable item
- * generated during itinerary creation (transport legs, attraction entry
- * tickets, restaurant reservations, hotel stays). This page NEVER
- * regenerates recommendations; it only reads back `booking_itinerary`,
- * which the AI Smart Transit Planner already computed once at generation
- * time (see backend/src/services/transportPlanner.service.js).
- */
 export default function BookingItinerary() {
   const { tripId } = useParams();
   const routerLocation = useLocation();
@@ -62,6 +53,7 @@ export default function BookingItinerary() {
     [itinerary]
   );
 
+  const accommodation = itinerary?.budget_summary?.ai_extras?.accommodation || null;
   const totalEstimatedCost = items.reduce((sum, i) => sum + (Number(i.estimated_cost_inr) || 0), 0);
 
   const { isTracked, addExpense, removeExpense } = useBudgetExpenses(tripId);
@@ -128,21 +120,25 @@ export default function BookingItinerary() {
         </Link>
       </div>
       <p className="text-sm text-[#0C3B5E]/55 mb-6">
-        Every bookable item generated for this trip, in one place — bus, cab, train, entry tickets, meals, and stays.
-        Tick the checkbox on an item once you've paid for it to log it in your Live Budget Tracker.
+        Every bookable item generated for this trip, in one place — transport, tickets, meals, and your recommended stay.
+        Tick an item once you've paid for it to log it in your Live Budget Tracker.
       </p>
+
+      {accommodation && (
+        <AccommodationBookingCard accommodation={accommodation} itinerary={itinerary} />
+      )}
 
       {items.length === 0 ? (
         <div className="rounded-2xl bg-white border border-[#0C3B5E]/10 p-6 text-center">
           <p className="text-sm text-[#0C3B5E]/60">
-            No bookable items yet — generate an itinerary first and this page will fill in automatically.
+            No other bookable items yet — your accommodation links are shown above when a stay is recommended.
           </p>
         </div>
       ) : (
         <>
           <div className="rounded-2xl bg-[#0C3B5E] text-white p-4 mb-6 flex items-center justify-between">
             <div>
-              <p className="text-[10px] font-mono uppercase tracking-wide text-white/50">Total bookable items</p>
+              <p className="text-[10px] font-mono uppercase tracking-wide text-white/50">Bookable items</p>
               <p className="font-display font-bold text-lg">{items.length}</p>
             </div>
             <div className="text-right">
@@ -165,6 +161,110 @@ export default function BookingItinerary() {
             ))}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+function AccommodationBookingCard({ accommodation, itinerary }) {
+  const trip = itinerary?.trip || itinerary?.trip_data || {};
+  const price = Number(accommodation.price_per_night_inr);
+  const total = Number(accommodation.estimated_total_stay_inr);
+
+  return (
+    <div className="rounded-2xl bg-white border border-[#0C3B5E]/10 p-4 mb-6">
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div>
+          <p className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wide text-[#0C3B5E]/45 mb-1">
+            <Hotel size={12} /> Recommended stay
+          </p>
+          <h2 className="font-display font-bold text-base text-[#0C3B5E]">{accommodation.name}</h2>
+        </div>
+        {accommodation.rating != null && (
+          <span className="flex items-center gap-1 shrink-0 text-xs font-semibold text-[#0C3B5E] bg-[#22C55E]/20 px-2 py-0.5 rounded-full">
+            <Star size={11} className="fill-[#22C55E] text-[#22C55E]" /> {accommodation.rating}
+          </span>
+        )}
+      </div>
+
+      {accommodation.address && (
+        <p className="text-xs text-[#0C3B5E]/55 mb-2">{accommodation.address}</p>
+      )}
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#0C3B5E]/65 mb-3">
+        {Number.isFinite(price) && price > 0 && (
+          <span className="flex items-center gap-1"><IndianRupee size={11} /> ~₹{price.toLocaleString('en-IN')}/night</span>
+        )}
+        {Number.isFinite(total) && total > 0 && (
+          <span className="flex items-center gap-1"><IndianRupee size={11} /> ~₹{total.toLocaleString('en-IN')} estimated stay</span>
+        )}
+        {accommodation.distance_km_from_center != null && (
+          <span className="flex items-center gap-1"><MapPinned size={11} /> {accommodation.distance_km_from_center} km from destination center</span>
+        )}
+      </div>
+
+      <div className="rounded-xl bg-[#0C3B5E]/[0.035] border border-[#0C3B5E]/8 p-3 mb-3">
+        <p className="text-[11px] font-semibold text-[#0C3B5E] mb-1">Check the current price before booking</p>
+        <p className="text-[10px] leading-relaxed text-[#0C3B5E]/50">
+          GoVIBE's displayed amount is only an estimate. The price-check link opens an external search with your trip dates and guest count so you can verify the live room rate.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {accommodation.price_check_url && (
+          <a
+            href={accommodation.price_check_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 text-[11px] font-semibold text-white bg-[#2563EB] rounded-lg px-3 py-2"
+          >
+            <Search size={12} /> Check live price
+          </a>
+        )}
+        {accommodation.compare_prices_url && (
+          <a
+            href={accommodation.compare_prices_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 text-[11px] font-semibold text-[#0C3B5E] bg-white border border-[#0C3B5E]/15 rounded-lg px-3 py-2"
+          >
+            <Search size={12} /> Compare prices
+          </a>
+        )}
+        {accommodation.website_url && (
+          <a
+            href={accommodation.website_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 text-[11px] font-semibold text-[#16A34A] bg-[#16A34A]/10 rounded-lg px-3 py-2"
+          >
+            <ExternalLink size={12} /> Hotel website
+          </a>
+        )}
+        {accommodation.booking_url && accommodation.booking_url !== accommodation.website_url && (
+          <a
+            href={accommodation.booking_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 text-[11px] font-semibold text-[#0C3B5E] bg-white border border-[#0C3B5E]/15 rounded-lg px-3 py-2"
+          >
+            <ExternalLink size={12} /> Book / check availability
+          </a>
+        )}
+        {accommodation.maps_url && (
+          <a
+            href={accommodation.maps_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 text-[11px] font-medium text-[#2563EB] px-1 py-2"
+          >
+            <MapPinned size={12} /> Maps
+          </a>
+        )}
+      </div>
+
+      {accommodation.price_estimate_note && (
+        <p className="text-[10px] text-[#0C3B5E]/35 mt-3">{accommodation.price_estimate_note}</p>
       )}
     </div>
   );
