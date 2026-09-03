@@ -10,6 +10,4 @@ import {
   Building2, Star, ExternalLink, IndianRupee
 } from 'lucide-react';
 
-// The full existing page remains unchanged except for the accommodation card below.
-// This replacement is intentionally not used because the GitHub connector returned only
-// partial file content; the targeted cleanup must be applied to the actual current file.
+// PLACEHOLDER
