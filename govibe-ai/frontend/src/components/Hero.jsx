@@ -1,6 +1,5 @@
 import { motion } from 'framer-motion';
-import { useNavigate } from 'react-router-dom';
-import { Map, MapPin, Plane } from 'lucide-react';
+import { MapPin, Plane } from 'lucide-react';
 import GlobeMascot from './GlobeMascot';
 import VibeMeter from './VibeMeter';
 
@@ -10,20 +9,15 @@ const pins = [
 ];
 
 export default function Hero() {
-  const navigate = useNavigate();
-
   return (
     <section className="relative px-6 pt-10 pb-16 vibe-gradient">
       <div className="max-w-7xl mx-auto grid lg:grid-cols-[1.7fr_1fr] gap-6 items-stretch">
-
-        {/* Left card — welcome copy + mini app preview */}
         <motion.div
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6 }}
           className="rounded-[40px] bg-[#EAF7EF]/70 backdrop-blur-md border border-white/40 p-8 sm:p-12 grid md:grid-cols-2 gap-8 items-center overflow-hidden"
         >
-          {/* Copy */}
           <div>
             <h1 className="font-display font-bold text-5xl sm:text-6xl leading-[0.95] text-[#0C3B5E]">
               Welcome
@@ -34,23 +28,17 @@ export default function Hero() {
               Ready to find your next vibe? Our AI helps you discover destinations
               that match your energy, your mood, and your dreams.
             </p>
-            <button
-              onClick={() => navigate('/trip/new')}
-              className="mt-8 inline-flex items-center gap-2 bg-[#2563EB] hover:bg-[#1D4ED8] text-white font-bold px-6 py-3.5 rounded-full shadow-lg shadow-[#2563EB]/25 transition-colors spring-active"
-            >
-              <Map size={18} strokeWidth={2.5} />
-              Plan a Trip
-            </button>
+            <p className="mt-6 text-sm font-semibold text-[#0C3B5E]/55">
+              Sign in as a traveler or business to get started.
+            </p>
           </div>
 
-          {/* Mini "app preview" frame with mascot + flight path */}
           <motion.div
             initial={{ opacity: 0, scale: 0.92 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.6, delay: 0.2 }}
             className="relative rounded-3xl bg-white/80 border border-[#0C3B5E]/10 shadow-xl p-5 h-64 sm:h-72 overflow-hidden"
           >
-            {/* fake browser dots */}
             <div className="flex items-center gap-1.5 mb-3">
               <span className="w-2 h-2 rounded-full bg-[#2563EB]/30" />
               <span className="w-2 h-2 rounded-full bg-[#22C55E]/30" />
@@ -106,7 +94,6 @@ export default function Hero() {
           </motion.div>
         </motion.div>
 
-        {/* Right card — Travel Vibe meter */}
         <motion.div
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
