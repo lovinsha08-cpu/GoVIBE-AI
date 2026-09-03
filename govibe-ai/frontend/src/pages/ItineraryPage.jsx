@@ -8,6 +8,7 @@ function ManualPlaceEditor({ tripId }) {
   const [open, setOpen] = useState(false);
   const [itinerary, setItinerary] = useState(null);
   const [activeStop, setActiveStop] = useState(null);
+  const [pendingPlace, setPendingPlace] = useState(null);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -66,27 +67,30 @@ function ManualPlaceEditor({ tripId }) {
 
   const startReplace = (stop) => {
     setActiveStop(stop);
+    setPendingPlace(null);
     setQuery('');
     setResults([]);
     setError('');
     setSuccess('');
   };
 
-  const confirmReplacement = async (place) => {
-    if (!activeStop) return;
+  const selectReplacement = (place) => {
+    setPendingPlace(place);
+    setError('');
+  };
+
+  const confirmReplacement = async () => {
+    if (!activeStop || !pendingPlace) return;
     setReplacing(true);
     setError('');
-    setSuccess('');
     try {
-      const res = await api.replaceItineraryStop(tripId, activeStop.order, place);
+      const res = await api.replaceItineraryStop(tripId, activeStop.order, pendingPlace);
       setItinerary(res.itinerary);
       setActiveStop(null);
+      setPendingPlace(null);
       setQuery('');
       setResults([]);
       setSuccess(`${res.previousStopName} was replaced with ${res.replacedStop.name}. Route, timing and budget were recalculated.`);
-      // ItineraryResults owns the full timeline state. Reloading after the
-      // persisted replacement guarantees every route card, map marker and
-      // budget summary reflects the same server-side itinerary.
       window.setTimeout(() => window.location.reload(), 900);
     } catch (err) {
       setError(err.message);
@@ -126,7 +130,7 @@ function ManualPlaceEditor({ tripId }) {
                 <div>
                   <p className="text-[10px] font-mono uppercase tracking-[0.18em] text-[#2563EB]">Itinerary editor</p>
                   <h2 className="text-xl font-bold text-[#0C3B5E] mt-1">Change a place yourself</h2>
-                  <p className="text-xs text-[#0C3B5E]/55 mt-1">Search a place, select it, and GoVIBE recalculates the affected route.</p>
+                  <p className="text-xs text-[#0C3B5E]/55 mt-1">Choose any itinerary stop, search for a replacement, review it, then confirm.</p>
                 </div>
                 <button onClick={() => setOpen(false)} className="w-9 h-9 rounded-xl bg-[#0C3B5E]/5 flex items-center justify-center text-[#0C3B5E]/65">
                   <X size={18} />
@@ -185,12 +189,12 @@ function ManualPlaceEditor({ tripId }) {
                   </div>
                 ) : (
                   <div>
-                    <button onClick={() => setActiveStop(null)} className="text-xs font-semibold text-[#2563EB] mb-4">← Back to itinerary places</button>
+                    <button onClick={() => { setActiveStop(null); setPendingPlace(null); }} className="text-xs font-semibold text-[#2563EB] mb-4">← Back to itinerary places</button>
 
                     <div className="rounded-2xl bg-[#0C3B5E] text-white p-4 mb-4">
                       <p className="text-[10px] font-mono uppercase tracking-wider text-white/50">Replace this place</p>
                       <p className="text-lg font-bold mt-1">{activeStop.name}</p>
-                      <p className="text-xs text-white/65 mt-1">Day {activeStop.day} · Search within {activeStop.day ? 'your destination area' : 'the trip area'}</p>
+                      <p className="text-xs text-white/65 mt-1">Day {activeStop.day} · Search within your destination area</p>
                     </div>
 
                     <div className="relative">
@@ -212,8 +216,8 @@ function ManualPlaceEditor({ tripId }) {
                         <button
                           key={`${place.place_id || place.id}-${place.name}`}
                           disabled={replacing}
-                          onClick={() => confirmReplacement(place)}
-                          className="w-full text-left rounded-xl bg-white border border-[#0C3B5E]/10 p-3.5 hover:border-[#2563EB]/35 hover:bg-[#2563EB]/[0.02] transition disabled:opacity-50"
+                          onClick={() => selectReplacement(place)}
+                          className={`w-full text-left rounded-xl bg-white border p-3.5 transition disabled:opacity-50 ${pendingPlace?.name === place.name ? 'border-[#2563EB] ring-2 ring-[#2563EB]/10' : 'border-[#0C3B5E]/10 hover:border-[#2563EB]/35 hover:bg-[#2563EB]/[0.02]'}`}
                         >
                           <div className="flex items-start gap-3">
                             <div className="w-9 h-9 rounded-lg bg-[#22C55E]/10 flex items-center justify-center shrink-0">
@@ -239,6 +243,18 @@ function ManualPlaceEditor({ tripId }) {
                         </div>
                       )}
                     </div>
+
+                    {pendingPlace && (
+                      <div className="mt-5 rounded-2xl bg-white border border-[#2563EB]/25 shadow-sm p-4">
+                        <p className="text-[10px] font-mono uppercase tracking-wider text-[#2563EB]">Confirm replacement</p>
+                        <p className="text-base font-bold text-[#0C3B5E] mt-1">Replace {activeStop.name} with {pendingPlace.name}?</p>
+                        <p className="text-xs text-[#0C3B5E]/55 mt-1.5 leading-relaxed">GoVIBE will update the stop's location and recompute the affected travel distance, travel time, transport mode, schedule, route totals and known entry-fee impact.</p>
+                        <div className="flex items-center justify-end gap-2 mt-4">
+                          <button onClick={() => setPendingPlace(null)} className="rounded-lg px-3 py-2 text-xs font-semibold text-[#0C3B5E]/60 hover:bg-[#0C3B5E]/5">Cancel</button>
+                          <button onClick={confirmReplacement} className="rounded-lg bg-[#0C3B5E] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#0C3B5E]/90">Replace place</button>
+                        </div>
+                      </div>
+                    )}
 
                     {replacing && (
                       <div className="fixed inset-0 z-[60] bg-[#0C3B5E]/25 flex items-center justify-center">
