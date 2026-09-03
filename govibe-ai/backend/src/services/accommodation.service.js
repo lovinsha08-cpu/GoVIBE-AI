@@ -3,15 +3,14 @@ import { haversineKm } from './geo.service.js';
 import { isGooglePlacesConfigured } from './googlePlaces.service.js';
 
 /**
- * Finds a real accommodation near the destination. Google Places is the
- * preferred source, but accommodation must not disappear just because the
- * optional Google key is unavailable. OpenStreetMap/Overpass is the
- * no-key fallback.
+ * Live accommodation discovery for GoVIBE.
  *
- * No hotel names, ratings or URLs are invented: every property comes from
- * Google Places, OSM, or an existing GoVIBE business row in future adapters.
+ * Google Places is the discovery source of truth for the MVP. OSM is only a
+ * resilience fallback when Google Places is unavailable. Neither source is
+ * treated as a live room-rate feed. Google price levels are used only as a
+ * clearly-labelled estimate; exact prices are checked through external
+ * hotel-search deeplinks using the traveler's dates and party size.
  */
-
 const NEARBY_SEARCH_URL = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json';
 const PLACE_DETAILS_URL = 'https://maps.googleapis.com/maps/api/place/details/json';
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
@@ -33,6 +32,37 @@ const STYLE_PREFERRED_PRICE_LEVEL = {
   budget_friendly: 1,
   hidden_gems_only: 1,
 };
+
+function encode(value) {
+  return encodeURIComponent(String(value || '').trim());
+}
+
+function normaliseDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+}
+
+function buildBookingSearchUrl({ place, trip, groupSize }) {
+  const checkin = normaliseDate(trip.start_date);
+  const checkout = normaliseDate(trip.end_date);
+  const guests = Math.max(1, Number(groupSize) || 1);
+  const destination = [place.name, place.address, trip.destination].filter(Boolean).join(', ');
+  const params = new URLSearchParams({
+    ss: destination,
+    group_adults: String(guests),
+    no_rooms: '1',
+    group_children: '0',
+  });
+  if (checkin) params.set('checkin', checkin);
+  if (checkout && checkout !== checkin) params.set('checkout', checkout);
+  return `https://www.booking.com/searchresults.html?${params.toString()}`;
+}
+
+function buildGoogleHotelSearchUrl({ place, trip }) {
+  const query = [place.name, place.address, trip.destination, 'hotel prices'].filter(Boolean).join(' ');
+  return `https://www.google.com/search?q=${encode(query)}`;
+}
 
 async function fetchGoogleJson(url, timeoutMs = 8000) {
   const controller = new AbortController();
@@ -56,11 +86,14 @@ async function fetchPlaceDetails(placeId) {
     const url = `${PLACE_DETAILS_URL}?place_id=${placeId}&fields=${fields}&key=${env.googlePlacesApiKey}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.result || null;
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.status === 'OK' ? data.result || null : null;
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch {
     return null;
   }
@@ -71,20 +104,22 @@ async function searchGoogleAccommodation(lat, lng) {
   try {
     const url = `${NEARBY_SEARCH_URL}?location=${lat},${lng}&radius=${SEARCH_RADIUS_METERS}&type=lodging&key=${env.googlePlacesApiKey}`;
     const raw = await fetchGoogleJson(url);
-    return raw.filter((p) => p.geometry?.location && (p.rating ?? 0) >= MIN_RATING).map((p) => ({
-      place_id: p.place_id,
-      name: p.name,
-      address: p.vicinity || null,
-      rating: p.rating ?? null,
-      review_count: p.user_ratings_total ?? 0,
-      price_level: p.price_level,
-      latitude: p.geometry.location.lat,
-      longitude: p.geometry.location.lng,
-      phone: null,
-      website_url: null,
-      maps_url: null,
-      source: 'google_places',
-    }));
+    return raw
+      .filter((p) => p.geometry?.location && (p.rating ?? 0) >= MIN_RATING && p.name)
+      .map((p) => ({
+        place_id: p.place_id,
+        name: p.name,
+        address: p.vicinity || null,
+        rating: p.rating ?? null,
+        review_count: p.user_ratings_total ?? 0,
+        price_level: p.price_level,
+        latitude: p.geometry.location.lat,
+        longitude: p.geometry.location.lng,
+        phone: null,
+        website_url: null,
+        maps_url: null,
+        source: 'google_places',
+      }));
   } catch (err) {
     console.warn('[accommodation] Google lodging search failed; using OSM fallback:', err.message);
     return [];
@@ -137,7 +172,7 @@ function estimatedPricePerNight(place) {
   return PRICE_LEVEL_TO_INR_PER_NIGHT[place.price_level] ?? DEFAULT_PRICE_LEVEL_INR;
 }
 
-function buildReason({ trip, place, pricePerNight, fitsBudget }) {
+function buildReason({ trip, place, fitsBudget }) {
   const bits = [];
   if (place.rating >= 4.5) bits.push(`an excellent ${place.rating}★ rating`);
   else if (place.rating >= 4.0) bits.push(`a strong ${place.rating}★ rating`);
@@ -153,9 +188,6 @@ export async function findAccommodationRecommendation({ trip, groupSize = 1, nig
   const lng = Number(trip.destination_lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
 
-  // Google gives us ratings, review counts, price tiers and official URLs.
-  // If it is unavailable, OSM still gives us real named accommodation so
-  // the feature continues to work rather than silently returning nothing.
   let candidates = await searchGoogleAccommodation(lat, lng);
   if (!candidates.length) candidates = await searchOsmAccommodation(lat, lng);
   if (!candidates.length) return null;
@@ -169,7 +201,6 @@ export async function findAccommodationRecommendation({ trip, groupSize = 1, nig
     const fitsBudget = maxPerNight <= 0 || pricePerNight <= maxPerNight * 1.15;
     const styleDistance = Math.abs((place.price_level ?? 2) - preferredLevel);
     const distanceKm = haversineKm(lat, lng, place.latitude, place.longitude);
-    // Prefer budget fit first, then quality/review evidence, then proximity.
     const qualityScore = (place.rating || 0) * 2 + Math.log10((place.review_count || 0) + 1) * 0.35;
     return { place, pricePerNight, fitsBudget, styleDistance, distanceKm, qualityScore };
   }).sort((a, b) => {
@@ -190,6 +221,10 @@ export async function findAccommodationRecommendation({ trip, groupSize = 1, nig
   const distanceKmFromCenter = Math.round(best.distanceKm * 10) / 10;
   const mapsUrl = details?.url || best.place.maps_url
     || `https://www.google.com/maps/search/?api=1&query=${best.place.latitude},${best.place.longitude}&query_place_id=${best.place.place_id}`;
+  const bookingUrl = details?.website || best.place.website_url || mapsUrl;
+  const priceCheckUrl = buildBookingSearchUrl({ place: best.place, trip, groupSize });
+  const comparePricesUrl = buildGoogleHotelSearchUrl({ place: best.place, trip });
+  const nightsSafe = Math.max(1, Number(nights) || 1);
 
   return {
     place_id: best.place.place_id,
@@ -199,6 +234,7 @@ export async function findAccommodationRecommendation({ trip, groupSize = 1, nig
     rating: best.place.rating ?? null,
     review_count: best.place.review_count || 0,
     price_per_night_inr: best.pricePerNight,
+    estimated_total_stay_inr: best.pricePerNight * nightsSafe,
     distance_km_from_center: distanceKmFromCenter,
     check_in_time: '12:00 PM',
     check_out_time: '10:00 AM',
@@ -206,10 +242,14 @@ export async function findAccommodationRecommendation({ trip, groupSize = 1, nig
     longitude: best.place.longitude,
     maps_url: mapsUrl,
     website_url: details?.website || best.place.website_url || null,
+    booking_url: bookingUrl,
+    price_check_url: priceCheckUrl,
+    compare_prices_url: comparePricesUrl,
+    price_check_provider: 'Booking.com search',
     source: best.place.source,
-    reason: buildReason({ trip, place: best.place, pricePerNight: best.pricePerNight, fitsBudget: best.fitsBudget }),
+    reason: buildReason({ trip, place: best.place, fitsBudget: best.fitsBudget }),
     price_estimate_note: best.place.source === 'google_places'
-      ? 'Approximate — based on Google\'s general pricing tier for this property, not live room rates.'
-      : 'Approximate — no live room rate was available from OpenStreetMap; verify the hotel price before booking.',
+      ? 'GoVIBE estimate only — Google Places pricing is a general tier, not a live room rate. Check live dates before booking.'
+      : 'GoVIBE estimate only — OSM has no live room rate. Check the current price before booking.',
   };
 }
