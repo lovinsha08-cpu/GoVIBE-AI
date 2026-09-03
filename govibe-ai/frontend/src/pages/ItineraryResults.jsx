@@ -10,4 +10,4 @@ import {
   Building2, Star, ExternalLink, IndianRupee
 } from 'lucide-react';
 
-// PLACEHOLDER
+// Restored via git in the next step.
