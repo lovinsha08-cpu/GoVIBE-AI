@@ -142,10 +142,7 @@ export default function BookingItinerary() {
               <p className="font-display font-bold text-lg">{items.length}</p>
             </div>
             <div className="text-right">
-              <p className="text-[10px] font-mono uppercase tracking-wide text-white/50">Estimated total cost</p>
               <p className="flex items-center justify-end gap-0.5 font-display font-bold text-lg text-[#22C55E]">
-                <IndianRupee size={15} /> {totalEstimatedCost.toLocaleString('en-IN')}
-              </p>
             </div>
           </div>
 
@@ -196,7 +193,7 @@ function AccommodationBookingCard({ accommodation, itinerary }) {
           <span className="flex items-center gap-1"><IndianRupee size={11} /> ~₹{price.toLocaleString('en-IN')}/night</span>
         )}
         {Number.isFinite(total) && total > 0 && (
-          <span className="flex items-center gap-1"><IndianRupee size={11} /> ~₹{total.toLocaleString('en-IN')} estimated stay</span>
+          <span className="flex items-center gap-1">
         )}
         {accommodation.distance_km_from_center != null && (
           <span className="flex items-center gap-1"><MapPinned size={11} /> {accommodation.distance_km_from_center} km from destination center</span>
@@ -263,9 +260,7 @@ function AccommodationBookingCard({ accommodation, itinerary }) {
         )}
       </div>
 
-      {accommodation.price_estimate_note && (
-        <p className="text-[10px] text-[#0C3B5E]/35 mt-3">{accommodation.price_estimate_note}</p>
-      )}
+      
     </div>
   );
 }
@@ -289,7 +284,6 @@ function BookingCard({ item, index, paid, onTogglePaid }) {
           <div className="flex items-center justify-between gap-2 mb-0.5">
             <span className="text-[10px] font-mono uppercase tracking-wide text-[#0C3B5E]/40">{meta.label}</span>
             {item.estimated_cost_inr != null && (
-              <span className="text-sm font-semibold text-[#0C3B5E] shrink-0">₹{Number(item.estimated_cost_inr).toLocaleString('en-IN')}</span>
             )}
           </div>
           <p className="font-display font-semibold text-sm text-[#0C3B5E] mb-1">{item.title}</p>
