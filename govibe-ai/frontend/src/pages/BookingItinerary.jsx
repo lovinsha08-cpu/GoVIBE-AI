@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import {
   Compass, Loader2, ArrowLeft, ExternalLink, Bus, Car, Train, TrainFront,
   Ship, Bike, Footprints, Ticket, UtensilsCrossed, Hotel, IndianRupee, Wallet,
-  Search, MapPinned, Star, CalendarDays,
+  Search, MapPinned, Star,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { useBudgetExpenses } from '../lib/useBudgetExpenses';
@@ -46,7 +46,7 @@ export default function BookingItinerary() {
       .then((res) => setItinerary(res.itinerary))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [tripId]);
+  }, [tripId, itinerary]);
 
   const items = useMemo(
     () => itinerary?.budget_summary?.ai_extras?.booking_itinerary || [],
@@ -58,7 +58,7 @@ export default function BookingItinerary() {
 
   const { isTracked, addExpense, removeExpense } = useBudgetExpenses(tripId);
 
-  const handleTogglePaid = (item, index) => {
+  const handleTogglePaid = async (item, index) => {
     const id = expenseIdFor(tripId, item, index);
     if (isTracked(id)) {
       removeExpense(id);
@@ -125,7 +125,7 @@ export default function BookingItinerary() {
       </p>
 
       {accommodation && (
-        <AccommodationBookingCard accommodation={accommodation} itinerary={itinerary} />
+        <AccommodationBookingCard accommodation={accommodation} />
       )}
 
       {items.length === 0 ? (
@@ -142,7 +142,10 @@ export default function BookingItinerary() {
               <p className="font-display font-bold text-lg">{items.length}</p>
             </div>
             <div className="text-right">
+              <p className="text-[10px] font-mono uppercase tracking-wide text-white/50">Other estimated costs</p>
               <p className="flex items-center justify-end gap-0.5 font-display font-bold text-lg text-[#22C55E]">
+                <IndianRupee size={15} /> {totalEstimatedCost.toLocaleString('en-IN')}
+              </p>
             </div>
           </div>
 
@@ -163,11 +166,7 @@ export default function BookingItinerary() {
   );
 }
 
-function AccommodationBookingCard({ accommodation, itinerary }) {
-  const trip = itinerary?.trip || itinerary?.trip_data || {};
-  const price = Number(accommodation.price_per_night_inr);
-  const total = Number(accommodation.estimated_total_stay_inr);
-
+function AccommodationBookingCard({ accommodation }) {
   return (
     <div className="rounded-2xl bg-white border border-[#0C3B5E]/10 p-4 mb-6">
       <div className="flex items-start justify-between gap-3 mb-2">
@@ -189,21 +188,29 @@ function AccommodationBookingCard({ accommodation, itinerary }) {
       )}
 
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#0C3B5E]/65 mb-3">
-        {Number.isFinite(price) && price > 0 && (
-          <span className="flex items-center gap-1"><IndianRupee size={11} /> ~₹{price.toLocaleString('en-IN')}/night</span>
-        )}
-        {Number.isFinite(total) && total > 0 && (
-          <span className="flex items-center gap-1">
-        )}
+        <span className="flex items-center gap-1 font-semibold text-[#0C3B5E]">
+          <Search size={11} /> Current price · check live price for your dates
+        </span>
         {accommodation.distance_km_from_center != null && (
-          <span className="flex items-center gap-1"><MapPinned size={11} /> {accommodation.distance_km_from_center} km from destination center</span>
+          <span className="flex items-center gap-1">
+            <MapPinned size={11} /> {accommodation.distance_km_from_center} km from destination center
+          </span>
+        )}
+        {(accommodation.check_in_time || accommodation.check_out_time) && (
+          <span>
+            Check-in {accommodation.check_in_time || '—'} · Check-out {accommodation.check_out_time || '—'}
+          </span>
         )}
       </div>
 
+      {accommodation.reason && (
+        <p className="text-xs text-[#0C3B5E]/60 italic mb-3">{accommodation.reason}</p>
+      )}
+
       <div className="rounded-xl bg-[#0C3B5E]/[0.035] border border-[#0C3B5E]/8 p-3 mb-3">
-        <p className="text-[11px] font-semibold text-[#0C3B5E] mb-1">Check the current price before booking</p>
+        <p className="text-[11px] font-semibold text-[#0C3B5E] mb-1">Verify the live room price before booking</p>
         <p className="text-[10px] leading-relaxed text-[#0C3B5E]/50">
-          GoVIBE's displayed amount is only an estimate. The price-check link opens an external search with your trip dates and guest count so you can verify the live room rate.
+          GoVIBE does not estimate or display a hotel room rate. The price-check link uses this trip's dates and guest count so you can verify the current external rate before deciding.
         </p>
       </div>
 
@@ -215,7 +222,7 @@ function AccommodationBookingCard({ accommodation, itinerary }) {
             rel="noopener noreferrer"
             className="flex items-center gap-1.5 text-[11px] font-semibold text-white bg-[#2563EB] rounded-lg px-3 py-2"
           >
-            <Search size={12} /> Check live price
+            <Search size={12} /> Check Current Price
           </a>
         )}
         {accommodation.compare_prices_url && (
@@ -225,7 +232,7 @@ function AccommodationBookingCard({ accommodation, itinerary }) {
             rel="noopener noreferrer"
             className="flex items-center gap-1.5 text-[11px] font-semibold text-[#0C3B5E] bg-white border border-[#0C3B5E]/15 rounded-lg px-3 py-2"
           >
-            <Search size={12} /> Compare prices
+            <Search size={12} /> Compare Prices
           </a>
         )}
         {accommodation.website_url && (
@@ -235,17 +242,7 @@ function AccommodationBookingCard({ accommodation, itinerary }) {
             rel="noopener noreferrer"
             className="flex items-center gap-1.5 text-[11px] font-semibold text-[#16A34A] bg-[#16A34A]/10 rounded-lg px-3 py-2"
           >
-            <ExternalLink size={12} /> Hotel website
-          </a>
-        )}
-        {accommodation.booking_url && accommodation.booking_url !== accommodation.website_url && (
-          <a
-            href={accommodation.booking_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1.5 text-[11px] font-semibold text-[#0C3B5E] bg-white border border-[#0C3B5E]/15 rounded-lg px-3 py-2"
-          >
-            <ExternalLink size={12} /> Book / check availability
+            <ExternalLink size={12} /> Hotel Website
           </a>
         )}
         {accommodation.maps_url && (
@@ -258,9 +255,15 @@ function AccommodationBookingCard({ accommodation, itinerary }) {
             <MapPinned size={12} /> Maps
           </a>
         )}
+        {accommodation.phone && (
+          <a
+            href={`tel:${accommodation.phone}`}
+            className="flex items-center gap-1.5 text-[11px] font-medium text-[#16A34A] px-1 py-2"
+          >
+            Call hotel
+          </a>
+        )}
       </div>
-
-      
     </div>
   );
 }
@@ -284,6 +287,7 @@ function BookingCard({ item, index, paid, onTogglePaid }) {
           <div className="flex items-center justify-between gap-2 mb-0.5">
             <span className="text-[10px] font-mono uppercase tracking-wide text-[#0C3B5E]/40">{meta.label}</span>
             {item.estimated_cost_inr != null && (
+              <span className="text-sm font-semibold text-[#0C3B5E] shrink-0">₹{Number(item.estimated_cost_inr).toLocaleString('en-IN')}</span>
             )}
           </div>
           <p className="font-display font-semibold text-sm text-[#0C3B5E] mb-1">{item.title}</p>
