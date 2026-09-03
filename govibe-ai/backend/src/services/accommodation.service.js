@@ -7,8 +7,7 @@ import { isGooglePlacesConfigured } from './googlePlaces.service.js';
  * Google Places is the discovery source; OSM is only a resilience fallback.
  * Neither source is treated as a live room-rate feed. Google price levels are
  * estimates only; exact dates/guest pricing is checked through an external
- * hotel-search deeplink. Booking.com Demand API can be added later for true
- * in-app live pricing once GoVIBE is onboarded as a managed affiliate partner.
+ * hotel-search deeplink using the traveler's complete trip details.
  */
 const NEARBY_SEARCH_URL = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json';
 const PLACE_DETAILS_URL = 'https://maps.googleapis.com/maps/api/place/details/json';
@@ -28,21 +27,60 @@ function normaliseDate(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
 }
+function normaliseTime(value) {
+  if (!value) return null;
+  const match = String(value).trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) return null;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
 
-function buildBookingSearchUrl({ place, trip, groupSize }) {
+function buildTripSearchContext({ place, trip, groupSize }) {
   const checkin = normaliseDate(trip.start_date);
   const checkout = normaliseDate(trip.end_date);
-  const guests = Math.max(1, Number(groupSize) || 1);
+  const startTime = normaliseTime(trip.start_time);
+  const endTime = normaliseTime(trip.end_time);
+  const adults = Math.max(1, Number(trip.adults) || Number(groupSize) || 1);
+  const children = Math.max(0, Number(trip.kids) || 0);
   const destination = [place.name, place.address, trip.destination].filter(Boolean).join(', ');
-  const params = new URLSearchParams({ ss: destination, group_adults: String(guests), no_rooms: '1', group_children: '0' });
-  if (checkin) params.set('checkin', checkin);
-  if (checkout && checkout !== checkin) params.set('checkout', checkout);
+  return { checkin, checkout, startTime, endTime, adults, children, destination };
+}
+
+function buildBookingSearchUrl({ place, trip, groupSize }) {
+  const context = buildTripSearchContext({ place, trip, groupSize });
+  const params = new URLSearchParams({
+    ss: context.destination,
+    group_adults: String(context.adults),
+    no_rooms: '1',
+    group_children: String(context.children),
+  });
+  if (context.checkin) params.set('checkin', context.checkin);
+  if (context.checkout && context.checkout !== context.checkin) params.set('checkout', context.checkout);
+  // Hotel inventory is priced by calendar dates. The trip's clock times are
+  // still preserved in the deep-link context for providers/pages that can
+  // use arrival/departure times when determining availability.
+  if (context.startTime) params.set('checkin_time', context.startTime);
+  if (context.endTime) params.set('checkout_time', context.endTime);
   return `https://www.booking.com/searchresults.html?${params.toString()}`;
 }
 
-function buildGoogleHotelSearchUrl({ place, trip }) {
-  const query = [place.name, place.address, trip.destination, 'hotel prices'].filter(Boolean).join(' ');
-  return `https://www.google.com/search?q=${encode(query)}`;
+function buildGoogleHotelSearchUrl({ place, trip, groupSize }) {
+  const context = buildTripSearchContext({ place, trip, groupSize });
+  const queryParts = [
+    place.name,
+    place.address,
+    trip.destination,
+    'hotel prices',
+    context.checkin && `check-in ${context.checkin}`,
+    context.checkout && `check-out ${context.checkout}`,
+    context.startTime && `arrival ${context.startTime}`,
+    context.endTime && `departure ${context.endTime}`,
+    `${context.adults} adults`,
+    context.children ? `${context.children} children` : null,
+  ].filter(Boolean);
+  return `https://www.google.com/search?q=${encode(queryParts.join(' '))}`;
 }
 
 async function fetchGoogleJson(url, timeoutMs = 8000) {
@@ -171,8 +209,9 @@ export async function findAccommodationRecommendation({ trip, groupSize = 1, nig
   const mapsUrl = details?.url || best.place.maps_url || `https://www.google.com/maps/search/?api=1&query=${best.place.latitude},${best.place.longitude}&query_place_id=${best.place.place_id}`;
   const websiteUrl = details?.website || best.place.website_url || null;
   const priceCheckUrl = buildBookingSearchUrl({ place: best.place, trip, groupSize });
-  const comparePricesUrl = buildGoogleHotelSearchUrl({ place: best.place, trip });
+  const comparePricesUrl = buildGoogleHotelSearchUrl({ place: best.place, trip, groupSize });
   const nightsSafe = Math.max(1, Number(nights) || 1);
+  const searchContext = buildTripSearchContext({ place: best.place, trip, groupSize });
 
   return {
     place_id: best.place.place_id, name: best.place.name,
@@ -185,7 +224,17 @@ export async function findAccommodationRecommendation({ trip, groupSize = 1, nig
     latitude: best.place.latitude, longitude: best.place.longitude,
     maps_url: mapsUrl, website_url: websiteUrl, booking_url: websiteUrl,
     price_check_url: priceCheckUrl, compare_prices_url: comparePricesUrl,
-    price_check_provider: 'Booking.com search', source: best.place.source,
+    price_check_provider: 'Booking.com search',
+    price_search_context: {
+      check_in_date: searchContext.checkin,
+      check_out_date: searchContext.checkout,
+      trip_start_time: searchContext.startTime,
+      trip_end_time: searchContext.endTime,
+      adults: searchContext.adults,
+      children: searchContext.children,
+      nights: nightsSafe,
+    },
+    source: best.place.source,
     reason: buildReason({ trip, place: best.place, fitsBudget: best.fitsBudget }),
     price_estimate_note: best.place.source === 'google_places'
       ? 'GoVIBE estimate only — Google Places pricing is a general tier, not a live room rate. Check live dates before booking.'
