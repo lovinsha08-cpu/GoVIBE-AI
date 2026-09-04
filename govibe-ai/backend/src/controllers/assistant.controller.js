@@ -4,11 +4,6 @@ import { regenerateStop } from '../services/itineraryEngine.service.js';
 import { orchestrateChat } from '../services/orchestrator.service.js';
 import { getRecentMessages, getOrCreateConversation } from '../services/memory.service.js';
 
-// Detects whether the logged-in user is a traveler or a business (requirement
-// 2). Authoritative source is which profile table actually has a row for
-// this auth user — falls back to the `role` set at signup time
-// (req.user.user_metadata.role, see auth.controller.js) if neither table
-// has a row yet (e.g. mid-signup race). Defaults to 'traveler'.
 async function detectUserRole(user) {
   if (!user) return 'traveler';
   const [{ data: traveler }, { data: business }] = await Promise.all([
@@ -20,17 +15,7 @@ async function detectUserRole(user) {
   return user.user_metadata?.role === 'business' ? 'business' : 'traveler';
 }
 
-// POST /api/assistant/chat  { trip_id?, message, history? }
-// trip_id is OPTIONAL. When provided, the assistant is scoped to that
-// trip's itinerary and can take actions (swap a stop, reorder a day).
-// When omitted — e.g. the general "ask anything" assistant on the
-// traveler/business dashboards, which isn't tied to any one trip — it
-// just answers conversationally with no trip context and no actions.
-//
-// history is an optional array of { role: 'user'|'assistant', content }
-// from earlier turns in this chat session — the frontend keeps it in
-// memory and echoes it back so the assistant has short-term context
-// without needing a new chat-messages table.
+// POST /api/assistant/chat  { trip_id?, message, history?, location? }
 export async function chat(req, res, next) {
   try {
     const { trip_id, message, history, location } = req.body;
@@ -38,18 +23,13 @@ export async function chat(req, res, next) {
       return res.status(400).json({ error: 'message is required' });
     }
 
-    // No trip_id — general "ask anything" assistant, no trip/itinerary to
-    // load. This is now the full AI orchestration layer: role detection,
-    // FAQ short-circuit, RAG grounding, and function calling against real
-    // backend data (requirements 2–10) — instead of a single direct Gemini
-    // call. `location` is optional { lat, lng } from the browser's
-    // geolocation, used for "near me" and emergency-services queries.
     if (!trip_id) {
       const role = await detectUserRole(req.user);
       const result = await orchestrateChat({
         userId: req.user?.id || null,
         role,
         message: message.trim(),
+        clientHistory: Array.isArray(history) ? history : [],
         location: location?.lat != null && location?.lng != null ? location : null,
       });
 
@@ -58,8 +38,8 @@ export async function chat(req, res, next) {
         action: 'none',
         itinerary: null,
         role,
-        route: result.route,          // which orchestration path answered (faq | rag | api_or_db | multi_tool | llm)
-        toolsUsed: result.toolsUsed,  // real backend functions invoked this turn, for UI transparency
+        route: result.route,
+        toolsUsed: result.toolsUsed,
       });
     }
 
@@ -94,7 +74,6 @@ export async function chat(req, res, next) {
 
     const { reply, action, stopOrder, day, newOrder } = assistantResult;
 
-    // "none" — just a conversational answer, nothing to save.
     if (action === 'none') {
       return res.json({ reply, action: 'none', itinerary: null });
     }
@@ -115,7 +94,6 @@ export async function chat(req, res, next) {
 
         return res.json({ reply, action: 'swap_stop', itinerary: updated, replacedStop, previousStopName });
       } catch (swapErr) {
-        // A bad/unavailable swap shouldn't break the chat — surface it conversationally.
         return res.json({
           reply: `${reply} (I wasn't able to make that swap: ${swapErr.message})`,
           action: 'none',
@@ -148,17 +126,12 @@ export async function chat(req, res, next) {
       }
     }
 
-    // Unknown action value — treat as a plain reply.
     return res.json({ reply, action: 'none', itinerary: null });
   } catch (err) {
     next(err);
   }
 }
 
-// GET /api/assistant/history — restores the general assistant's persisted
-// conversation (requirement 11: "conversation history") so a page reload
-// or a new device doesn't lose context. Trip-scoped chats intentionally
-// stay session-only (frontend-held `history`), matching existing behavior.
 export async function getHistory(req, res, next) {
   try {
     const role = await detectUserRole(req.user);
