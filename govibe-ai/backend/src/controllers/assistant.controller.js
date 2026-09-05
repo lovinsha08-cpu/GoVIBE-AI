@@ -4,6 +4,7 @@ import { regenerateStop } from '../services/itineraryEngine.service.js';
 import { orchestrateChat } from '../services/orchestrator.service.js';
 import { getRecentMessages, getOrCreateConversation } from '../services/memory.service.js';
 import { runConversationPreflight } from '../services/conversationPreflight.service.js';
+import { buildConversationContext } from '../services/conversationContext.service.js';
 
 async function detectUserRole(user) {
   if (!user) return 'traveler';
@@ -20,7 +21,8 @@ function cleanAssistantReply(value) {
   return String(value || '')
     .replace(/```(?:svg|xml)[\s\S]*?```/gi, '')
     .replace(/<svg[\s\S]*?<\/svg>/gi, '')
-    .replace(/^\s*svg\s*$/gim, '')
+    .replace(/^\s*(?:svg|xml)\s*$/gim, '')
+    .replace(/^\s*<\?xml[^>]*>\s*$/gim, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -36,12 +38,20 @@ export async function chat(req, res, next) {
     if (!trip_id) {
       const role = await detectUserRole(req.user);
       const clientHistory = Array.isArray(history) ? history : [];
+      const deviceLocation = location?.lat != null && location?.lng != null ? location : null;
+
+      // Build the conversation context exactly once at the HTTP boundary. The
+      // deterministic router receives this same context instead of rebuilding
+      // an independent interpretation of the short user message.
+      const canonicalContext = buildConversationContext(clientHistory, message.trim(), role);
 
       const preflight = await runConversationPreflight({
         userId: req.user?.id || null,
         role,
         message: message.trim(),
         clientHistory,
+        location: deviceLocation,
+        canonicalContext,
       });
       if (preflight?.handled) {
         return res.json({
@@ -53,6 +63,13 @@ export async function chat(req, res, next) {
           role,
           route: preflight.route,
           toolsUsed: preflight.toolsUsed || [],
+          sources: preflight.sources || [],
+          conversationContext: {
+            intent: canonicalContext.intent,
+            category: canonicalContext.category,
+            location: canonicalContext.location,
+            destination: canonicalContext.destination,
+          },
         });
       }
 
@@ -61,7 +78,8 @@ export async function chat(req, res, next) {
         role,
         message: message.trim(),
         clientHistory,
-        location: location?.lat != null && location?.lng != null ? location : null,
+        location: deviceLocation,
+        conversationContext: canonicalContext,
       });
 
       return res.json({
@@ -71,6 +89,13 @@ export async function chat(req, res, next) {
         role,
         route: result.route,
         toolsUsed: result.toolsUsed,
+        sources: result.sources || [],
+        conversationContext: {
+          intent: canonicalContext.intent,
+          category: canonicalContext.category,
+          location: canonicalContext.location,
+          destination: canonicalContext.destination,
+        },
       });
     }
 
