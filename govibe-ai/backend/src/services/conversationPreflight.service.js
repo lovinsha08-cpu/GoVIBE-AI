@@ -1,12 +1,13 @@
 /**
- * Deterministic conversation preflight.
+ * Deterministic conversational preflight.
  *
- * Layer 1 protects high-confidence turns from LLM intent drift.
- * Layer 2 (conversationState.service) supplies the durable facts that this
- * layer uses to resolve corrections and follow-up messages.
+ * This is the safety/routing boundary before the LLM. High-confidence turns
+ * are resolved here; complete trip states are handed to the real itinerary
+ * pipeline instead of being answered with generic chat or weather.
  */
 import { getFunctionHandler } from './assistantFunctions.service.js';
 import { getOrCreateConversation, appendMessage } from './memory.service.js';
+import { buildTripFromConversation, formatGeneratedTripReply } from './chatTripPlanner.service.js';
 import {
   buildConversationState,
   isBareDate,
@@ -64,10 +65,7 @@ function categoryFromText(text) {
 
 function formatNearbyReply(result) {
   const rows = Array.isArray(result?.results) ? result.results : [];
-  if (!rows.length) {
-    return `I couldn't find any verified ${result?.resolved_category || 'places'} near ${result?.searched_near || 'that location'} right now.`;
-  }
-
+  if (!rows.length) return `I couldn't find any verified ${result?.resolved_category || 'places'} near ${result?.searched_near || 'that location'} right now.`;
   const lines = rows.slice(0, 8).map((r, i) => {
     const bits = [`${i + 1}. **${r.name}**`];
     if (r.distance_km != null) bits.push(`${Number(r.distance_km).toFixed(1)} km`);
@@ -76,7 +74,6 @@ function formatNearbyReply(result) {
     if (r.is_govibe_partner) bits.push('GoVIBE partner');
     return bits.join(' · ');
   });
-
   return `Here are verified options near **${result.searched_near}**:\n\n${lines.join('\n')}`;
 }
 
@@ -105,56 +102,52 @@ async function executeNearby({ userId, role, message, query, near }) {
   const handler = getFunctionHandler('find_nearby', role);
   if (!handler) return null;
   try {
-    const result = await handler(
-      { query, near, radius_meters: 5000 },
-      { userId, role, lat: null, lng: null },
-    );
+    const result = await handler({ query, near, radius_meters: 5000 }, { userId, role, lat: null, lng: null });
     if (!result || result.error) return null;
     const reply = stripInternalMarkup(formatNearbyReply(result));
     await persistHandledTurn({ userId, role, message, reply, route: 'deterministic_nearby' });
-    return {
-      handled: true,
-      reply,
-      route: 'deterministic_nearby',
-      toolsUsed: [{ name: 'find_nearby', args: { query, near, radius_meters: 5000 } }],
-    };
+    return { handled: true, reply, route: 'deterministic_nearby', toolsUsed: [{ name: 'find_nearby', args: { query, near, radius_meters: 5000 } }] };
   } catch {
     return null;
   }
 }
 
 async function handlePlanningTurn({ userId, role, message, history, state }) {
-  const combined = allUserText(history, message);
-  const missing = missingPlanningData(state);
-
-  // If this is merely a weather question, never turn it into a trip plan.
   if (isExplicitWeatherRequest(message) && !isPlanningRequest(message)) return null;
 
-  // Do not fabricate an itinerary while required fields are absent.
+  const missing = missingPlanningData(state);
   if (missing.length) {
     const known = [];
     if (state.destination) known.push(`destination **${state.destination}**`);
     if (state.travelDate) known.push(`date **${state.travelDate}**`);
     if (state.duration) known.push(`duration **${state.duration}**`);
     if (state.budget) known.push(`budget **₹${state.budget}**`);
-    if (state.origin || state.currentLocation) {
-      known.push(`starting point **${state.origin || state.currentLocation}**`);
-    }
-
-    const prefix = known.length
-      ? `Got it — I have ${known.join(', ')}.`
-      : 'Got it.';
+    if (state.origin || state.currentLocation) known.push(`starting point **${state.origin || state.currentLocation}**`);
+    const prefix = known.length ? `Got it — I have ${known.join(', ')}.` : 'Got it.';
     const reply = `${prefix} To build the actual trip plan, I still need your **${missing.join(', ')}**.`;
     await persistHandledTurn({ userId, role, message, reply, route: 'deterministic_planning' });
     return { handled: true, reply, route: 'deterministic_planning', toolsUsed: [] };
   }
 
-  // Layer 2 deliberately stops at a complete canonical state. The next layer
-  // will map this state into the real itinerary-generation pipeline.
-  return null;
+  const result = await buildTripFromConversation({ userId, state });
+  const reply = stripInternalMarkup(result.ok ? formatGeneratedTripReply(result) : result.message);
+  const route = result.ok ? 'conversation_trip_generation' : `conversation_trip_error:${result.code}`;
+  await persistHandledTurn({ userId, role, message, reply, route });
+
+  if (!result.ok) {
+    return { handled: true, reply, route, toolsUsed: [] };
+  }
+
+  return {
+    handled: true,
+    reply,
+    route,
+    toolsUsed: [{ name: 'generate_conversational_itinerary', args: { trip_id: result.trip.id } }],
+    itinerary: result.itinerary,
+    trip: result.trip,
+  };
 }
 
-/** Returns null when the normal LLM orchestrator should handle the turn. */
 export async function runConversationPreflight({ userId, role, message, clientHistory = [] }) {
   const history = Array.isArray(clientHistory) ? clientHistory : [];
   const text = String(message || '').trim();
@@ -163,7 +156,6 @@ export async function runConversationPreflight({ userId, role, message, clientHi
   const state = buildConversationState(history, text);
   const planningContext = isPlanningRequest(text) || /\b(?:visit|travel|go to|trip)\b/i.test(allUserText(history, ''));
 
-  // 1) Bare date = correction to the active trip date, never weather.
   if (isBareDate(text) && planningContext) {
     const reply = state.destination
       ? `Got it — I’ve updated your trip date to **${text.replace(/[.!]$/, '')}** for **${state.destination}**.`
@@ -172,7 +164,6 @@ export async function runConversationPreflight({ userId, role, message, clientHi
     return { handled: true, reply, route: 'deterministic_date_update', toolsUsed: [] };
   }
 
-  // 2) Current location is state, not an implicit replacement for the target.
   if (isCurrentLocationStatement(text)) {
     const place = state.currentLocation;
     const previous = lastUserText(history);
@@ -183,7 +174,6 @@ export async function runConversationPreflight({ userId, role, message, clientHi
     }
   }
 
-  // 3) Explicit named-place discovery.
   const namedMatch = text.match(NAMED_NEARBY_RE);
   if (namedMatch) {
     const near = cleanPlace(namedMatch[1]);
@@ -192,7 +182,6 @@ export async function runConversationPreflight({ userId, role, message, clientHi
     if (result) return result;
   }
 
-  // 4) Broad category discovery: "nature places in Chennai".
   const category = categoryFromText(text);
   const inMatch = text.match(CATEGORY_LOCATION_RE);
   if (category && inMatch) {
@@ -201,7 +190,6 @@ export async function runConversationPreflight({ userId, role, message, clientHi
     if (result) return result;
   }
 
-  // 5) A short location suffix continues the previous discovery topic.
   const suffix = text.match(LOCATION_SUFFIX_RE);
   if (suffix) {
     const place = cleanPlace(suffix[1]);
@@ -212,7 +200,6 @@ export async function runConversationPreflight({ userId, role, message, clientHi
     }
   }
 
-  // 6) "near me" resolves against the canonical current-location state.
   if (/\b(?:near me|nearby)\b/i.test(text)) {
     const near = state.currentLocation;
     const query = categoryFromText(text) || previousCategory(history, state);
@@ -222,8 +209,6 @@ export async function runConversationPreflight({ userId, role, message, clientHi
     }
   }
 
-  // 7) Planning comes after discovery so "visit parks in Chennai" remains a
-  // discovery request unless the user explicitly asks for a trip plan.
   if (isPlanningRequest(text)) {
     const result = await handlePlanningTurn({ userId, role, message: text, history, state });
     if (result) return result;
