@@ -3,7 +3,7 @@ import { generateAssistantReply, applyReorderDay } from '../services/assistant.s
 import { regenerateStop } from '../services/itineraryEngine.service.js';
 import { orchestrateChat } from '../services/orchestrator.service.js';
 import { getRecentMessages, getOrCreateConversation } from '../services/memory.service.js';
-import { runConversationPreflight, stripInternalMarkup } from '../services/conversationPreflight.service.js';
+import { runConversationPreflight } from '../services/conversationPreflight.service.js';
 
 async function detectUserRole(user) {
   if (!user) return 'traveler';
@@ -16,6 +16,15 @@ async function detectUserRole(user) {
   return user.user_metadata?.role === 'business' ? 'business' : 'traveler';
 }
 
+function cleanAssistantReply(value) {
+  return String(value || '')
+    .replace(/```(?:svg|xml)[\\s\\S]*?```/gi, '')
+    .replace(/<svg[\\s\\S]*?<\\/svg>/gi, '')
+    .replace(/^\\s*svg\\s*$/gim, '')
+    .replace(/\\n{3,}/g, '\\n\\n')
+    .trim();
+}
+
 // POST /api/assistant/chat  { trip_id?, message, history?, location? }
 export async function chat(req, res, next) {
   try {
@@ -26,21 +35,19 @@ export async function chat(req, res, next) {
 
     if (!trip_id) {
       const role = await detectUserRole(req.user);
-      const cleanMessage = message.trim();
       const clientHistory = Array.isArray(history) ? history : [];
 
-      // Deterministic conversation preflight runs before the LLM. This is
-      // intentionally small: it fixes high-confidence follow-ups without
-      // replacing the model for nuanced questions.
+      // Resolve high-confidence conversational follow-ups before probabilistic
+      // routing. This is deliberately before orchestrateChat/classification.
       const preflight = await runConversationPreflight({
         userId: req.user?.id || null,
         role,
-        message: cleanMessage,
+        message: message.trim(),
         clientHistory,
       });
       if (preflight?.handled) {
         return res.json({
-          reply: stripInternalMarkup(preflight.reply),
+          reply: cleanAssistantReply(preflight.reply),
           action: 'none',
           itinerary: null,
           role,
@@ -52,13 +59,13 @@ export async function chat(req, res, next) {
       const result = await orchestrateChat({
         userId: req.user?.id || null,
         role,
-        message: cleanMessage,
+        message: message.trim(),
         clientHistory,
         location: location?.lat != null && location?.lng != null ? location : null,
       });
 
       return res.json({
-        reply: stripInternalMarkup(result.reply),
+        reply: cleanAssistantReply(result.reply),
         action: 'none',
         itinerary: null,
         role,
@@ -90,7 +97,7 @@ export async function chat(req, res, next) {
 
     if (!assistantResult) {
       return res.json({
-        reply: "I can't reach the assistant right now — try again in a moment. In the meantime you can swap or regenerate stops directly from the itinerary view.",
+        reply: "I couldn't process that itinerary request right now. Please try again — your saved itinerary is unchanged.",
         action: 'none',
         itinerary: null,
       });
@@ -99,12 +106,12 @@ export async function chat(req, res, next) {
     const { reply, action, stopOrder, day, newOrder } = assistantResult;
 
     if (action === 'none') {
-      return res.json({ reply: stripInternalMarkup(reply), action: 'none', itinerary: null });
+      return res.json({ reply: cleanAssistantReply(reply), action: 'none', itinerary: null });
     }
 
     if (action === 'swap_stop') {
       if (!Number.isFinite(stopOrder)) {
-        return res.json({ reply: stripInternalMarkup(reply), action: 'none', itinerary: null });
+        return res.json({ reply: cleanAssistantReply(reply), action: 'none', itinerary: null });
       }
       try {
         const { stops, replacedStop, previousStopName } = await regenerateStop(trip, itinerary, stopOrder);
@@ -116,10 +123,10 @@ export async function chat(req, res, next) {
           .single();
         if (updateError) return res.status(400).json({ error: updateError.message });
 
-        return res.json({ reply: stripInternalMarkup(reply), action: 'swap_stop', itinerary: updated, replacedStop, previousStopName });
+        return res.json({ reply: cleanAssistantReply(reply), action: 'swap_stop', itinerary: updated, replacedStop, previousStopName });
       } catch (swapErr) {
         return res.json({
-          reply: stripInternalMarkup(`${reply} (I wasn't able to make that swap: ${swapErr.message})`),
+          reply: `${cleanAssistantReply(reply)} (I wasn't able to make that swap: ${swapErr.message})`,
           action: 'none',
           itinerary: null,
         });
@@ -128,7 +135,7 @@ export async function chat(req, res, next) {
 
     if (action === 'reorder_day') {
       if (!Number.isFinite(day) || !Array.isArray(newOrder) || newOrder.length === 0) {
-        return res.json({ reply: stripInternalMarkup(reply), action: 'none', itinerary: null });
+        return res.json({ reply: cleanAssistantReply(reply), action: 'none', itinerary: null });
       }
       try {
         const stops = applyReorderDay(itinerary.stops || [], day, newOrder);
@@ -140,17 +147,17 @@ export async function chat(req, res, next) {
           .single();
         if (updateError) return res.status(400).json({ error: updateError.message });
 
-        return res.json({ reply: stripInternalMarkup(reply), action: 'reorder_day', itinerary: updated });
+        return res.json({ reply: cleanAssistantReply(reply), action: 'reorder_day', itinerary: updated });
       } catch (reorderErr) {
         return res.json({
-          reply: stripInternalMarkup(`${reply} (I wasn't able to make that change: ${reorderErr.message})`),
+          reply: `${cleanAssistantReply(reply)} (I wasn't able to make that change: ${reorderErr.message})`,
           action: 'none',
           itinerary: null,
         });
       }
     }
 
-    return res.json({ reply: stripInternalMarkup(reply), action: 'none', itinerary: null });
+    return res.json({ reply: cleanAssistantReply(reply), action: 'none', itinerary: null });
   } catch (err) {
     next(err);
   }
@@ -162,7 +169,7 @@ export async function getHistory(req, res, next) {
     const conversation = await getOrCreateConversation({ userId: req.user.id, role, tripId: null });
     if (!conversation) return res.json({ messages: [] });
     const messages = await getRecentMessages(conversation.id, 30);
-    res.json({ messages: messages.map((m) => ({ role: m.role, content: stripInternalMarkup(m.content) })) });
+    res.json({ messages: messages.map((m) => ({ role: m.role, content: cleanAssistantReply(m.content) })) });
   } catch (err) {
     next(err);
   }
