@@ -13,7 +13,6 @@
  * prevents deterministic misroutes and unnecessary clarification loops.
  */
 import { getFunctionHandler } from './assistantFunctions.service.js';
-import { geocodePlace } from './geocoding.service.js';
 import { getOrCreateConversation, appendMessage } from './memory.service.js';
 
 const MONTHS = 'January|February|March|April|May|June|July|August|September|October|November|December';
@@ -40,6 +39,19 @@ function previousTopic(history) {
   if (/\\bpark|garden|botanical|nature|green space|jogging\\b/.test(text)) return 'nature';
   if (/\\bhotel|stay|resort|accommodation\\b/.test(text)) return 'hotels';
   if (/\\bmuseum|heritage|history|culture\\b/.test(text)) return 'museums';
+  return null;
+}
+
+function categoryFromNearbyText(text) {
+  const lower = text.toLowerCase();
+  if (/\\brestaurant|restaurants|cafe|cafes|food|eat|dining\\b/.test(lower)) return 'restaurants';
+  if (/\\bbotanical garden|garden|gardens|park|jogging|nature|green space\\b/.test(lower)) return 'parks and botanical gardens';
+  if (/\\bhotel|hotels|resort|resorts|stay|accommodation\\b/.test(lower)) return 'hotels';
+  if (/\\bmuseum|museums|heritage|history|culture\\b/.test(lower)) return 'museums';
+  if (/\\bhospital|hospitals\\b/.test(lower)) return 'hospitals';
+  if (/\\bpharmacy|pharmacies\\b/.test(lower)) return 'pharmacies';
+  if (/\\batm|atms\\b/.test(lower)) return 'ATMs';
+  if (/\\bpetrol|fuel|gas station\\b/.test(lower)) return 'petrol pumps';
   return null;
 }
 
@@ -128,12 +140,8 @@ export async function runConversationPreflight({ userId, role, message, clientHi
   const namedMatch = text.match(NAMED_NEARBY_RE);
   if (namedMatch) {
     const near = cleanPlace(namedMatch[1]);
-    const query = text
-      .replace(namedMatch[0], '')
-      .replace(/\\b(?:near|around|by|close to)\\s+.*$/i, '')
-      .trim();
-    const normalizedQuery = query || previousTopic(history) || 'places';
-    const result = await executeNearby({ userId, role, message: text, query: normalizedQuery, near });
+    const query = categoryFromNearbyText(text) || previousTopic(history) || 'places';
+    const result = await executeNearby({ userId, role, message: text, query, near });
     if (result) return result;
   }
 
