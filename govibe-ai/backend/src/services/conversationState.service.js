@@ -18,27 +18,27 @@ const INTERESTS = [
 ];
 
 const CATEGORY_RULES = [
-  [/\\b(?:restaurant|restaurants|cafe|cafes|food|dining|eat|eating)\\b/i, 'restaurants'],
-  [/\\b(?:park|parks|garden|gardens|botanical garden|nature|green space|jogging)\\b/i, 'nature'],
-  [/\\b(?:museum|museums|heritage|history|historical|culture)\\b/i, 'heritage'],
-  [/\\b(?:beach|beaches)\\b/i, 'beaches'],
-  [/\\b(?:hotel|hotels|resort|resorts|stay|accommodation)\\b/i, 'hotels'],
-  [/\\b(?:shopping|shops?|mall|malls|market|markets)\\b/i, 'shopping'],
-  [/\\b(?:hospital|hospitals|clinic|clinics)\\b/i, 'hospitals'],
-  [/\\b(?:pharmacy|pharmacies|chemist|chemists)\\b/i, 'pharmacies'],
-  [/\\b(?:atm|atms|cash)\\b/i, 'ATMs'],
-  [/\\b(?:petrol|fuel|gas station)\\b/i, 'petrol pumps'],
+  [/\b(?:restaurant|restaurants|cafe|cafes|food|dining|eat|eating)\b/i, 'restaurants'],
+  [/\b(?:park|parks|garden|gardens|botanical garden|nature|green space|jogging)\b/i, 'nature'],
+  [/\b(?:museum|museums|heritage|history|historical|culture)\b/i, 'heritage'],
+  [/\b(?:beach|beaches)\b/i, 'beaches'],
+  [/\b(?:hotel|hotels|resort|resorts|stay|accommodation)\b/i, 'hotels'],
+  [/\b(?:shopping|shops?|mall|malls|market|markets)\b/i, 'shopping'],
+  [/\b(?:hospital|hospitals|clinic|clinics)\b/i, 'hospitals'],
+  [/\b(?:pharmacy|pharmacies|chemist|chemists)\b/i, 'pharmacies'],
+  [/\b(?:atm|atms|cash)\b/i, 'ATMs'],
+  [/\b(?:petrol|fuel|gas station)\b/i, 'petrol pumps'],
 ];
 
 function clean(value) {
   return String(value || '')
-    .replace(/\\s+/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim()
-    .replace(/^[,.:;\\-]+|[,.:;\\-]+$/g, '');
+    .replace(/^[,.:;\-]+|[,.:;\-]+$/g, '');
 }
 
 function normalizeDate(value) {
-  return clean(value).replace(/\\s+/g, ' ');
+  return clean(value).replace(/\s+/g, ' ');
 }
 
 function extractDate(text) {
@@ -47,26 +47,26 @@ function extractDate(text) {
 }
 
 function extractBudget(text) {
-  const match = String(text || '').match(/\\b(?:budget|under|below|within|around)\\s*(?:rs\\.?|inr|₹)?\\s*(\\d{3,7})\\b/i);
+  const match = String(text || '').match(/\b(?:budget|under|below|within|around)\s*(?:rs\.?|inr|₹)?\s*(\d{3,7})\b/i);
   return match ? Number(match[1]) : null;
 }
 
 function extractPeople(text) {
-  const match = String(text || '').match(/\\b(?:for|with)\\s+(\\d{1,2})\\s+(?:people|persons?|travelers?|travellers?)\\b/i);
+  const match = String(text || '').match(/\b(?:for|with)\s+(\d{1,2})\s+(?:people|persons?|travelers?|travellers?)\b/i);
   return match ? Number(match[1]) : null;
 }
 
 function extractDuration(text) {
-  const match = String(text || '').match(/\\b(\\d{1,2})\\s*[- ]?(day|days|night|nights)\\b/i);
+  const match = String(text || '').match(/\b(\d{1,2})\s*[- ]?(day|days|night|nights)\b/i);
   return match ? `${match[1]} ${match[2]}` : null;
 }
 
 function extractRoute(text) {
   const raw = String(text || '');
-  const standard = raw.match(/\\bfrom\\s+([^,.!?]+?)\\s+to\\s+([^,.!?]+?)(?=[?.!]|$)/i);
+  const standard = raw.match(/\bfrom\s+(.+?)\s+to\s+(.+?)(?=[?.!]|$)/i);
   if (standard) return { origin: clean(standard[1]), destination: clean(standard[2]) };
 
-  const reverse = raw.match(/\\b(?:reach|get to|go to|travel to)\\s+([^,.!?]+?)\\s+from\\s+([^,.!?]+?)(?=[?.!]|$)/i);
+  const reverse = raw.match(/\b(?:reach|get to|go to|travel to)\s+(.+?)\s+from\s+(.+?)(?=[?.!]|$)/i);
   if (reverse) return { origin: clean(reverse[2]), destination: clean(reverse[1]) };
 
   return null;
@@ -74,19 +74,19 @@ function extractRoute(text) {
 
 function extractDestination(text) {
   const raw = String(text || '');
-  const match = raw.match(/\\b(?:visit|visiting|trip\\s+to|go\\s+to|travel(?:ing|ling)?\\s+to|plan(?:\\s+my)?\\s+(?:a\\s+)?trip\\s+to)\\s+([^,.!?]+(?:,\\s*[^,.!?]+)?)/i);
+  const match = raw.match(/\b(?:visit|visiting|trip\s+to|go\s+to|travel(?:ing|ling)?\s+to|plan(?:\s+my)?\s+(?:a\s+)?trip\s+to)\s+([^,.!?]+(?:,\s*[^,.!?]+)?)/i);
   if (!match?.[1]) return null;
-  return clean(match[1].replace(/\\s+(?:on|for|under|within|around|with|and)\\s+.*$/i, ''));
+  return clean(match[1].replace(/\s+(?:on|for|under|within|around|with|and)\s+.*$/i, ''));
 }
 
 function extractCurrentLocation(text) {
-  const match = String(text || '').match(/^\\s*(?:i(?:'m| am)|we(?:'re| are))\\s+(?:now\\s+)?(?:in|at)\\s+(.+?)\\s*[.!]?\\s*$/i);
+  const match = String(text || '').match(/^\s*(?:i(?:'m| am)|we(?:'re| are))\s+(?:now\s+)?(?:in|at)\s+(.+?)\s*[.!]?\s*$/i);
   return match ? clean(match[1]) : null;
 }
 
 function extractGenericLocation(text) {
   const raw = String(text || '');
-  const match = raw.match(/\\b(?:in|at|near|around|by|close to)\\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60}?)(?=\\s*(?:[?.!]|$)|\\s+(?:for|with|under|below|within|today|tomorrow|please|suggest|find|show|recommend)\\b)/i);
+  const match = raw.match(/\b(?:in|at|near|around|by|close to)\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60}?)(?=\s*(?:[?.!]|$)|\s+(?:for|with|under|below|within|today|tomorrow|please|suggest|find|show|recommend)\b)/i);
   return match ? clean(match[1]) : null;
 }
 
@@ -104,10 +104,6 @@ function mergeFact(state, key, value) {
   if (value !== null && value !== undefined && value !== '') state[key] = value;
 }
 
-/**
- * Build the canonical state from prior user turns and the current message.
- * Explicit current-turn facts always override older values.
- */
 export function buildConversationState(history = [], currentMessage = '') {
   const state = {
     destination: null,
@@ -150,8 +146,6 @@ export function buildConversationState(history = [], currentMessage = '') {
 
     const genericLocation = extractGenericLocation(text);
     if (genericLocation && !extractCurrentLocation(text)) {
-      // Generic "in Chennai" is useful as a discovery location, but must not
-      // overwrite an explicit current-location statement.
       state.destination = state.destination || genericLocation;
     }
 
@@ -173,11 +167,11 @@ export function isCurrentLocationStatement(message) {
 }
 
 export function isExplicitWeatherRequest(message) {
-  return /\\b(?:weather|forecast|rain|rainfall|temperature|humid(?:ity)?|sunny|cloudy)\\b/i.test(String(message || ''));
+  return /\b(?:weather|forecast|rain|rainfall|temperature|humid(?:ity)?|sunny|cloudy)\b/i.test(String(message || ''));
 }
 
 export function isPlanningRequest(message) {
-  return /\\b(?:plan|planning|itinerary|trip plan|plan a trip|travel plan|getaway|vacation)\\b/i.test(String(message || ''));
+  return /\b(?:plan|planning|itinerary|trip plan|plan a trip|travel plan|getaway|vacation)\b/i.test(String(message || ''));
 }
 
 export function hasEnoughPlanningData(state) {
