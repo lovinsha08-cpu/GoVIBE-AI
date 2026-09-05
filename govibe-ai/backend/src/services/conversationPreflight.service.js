@@ -1,26 +1,29 @@
 /**
  * Deterministic conversation preflight.
  *
- * The LLM should answer nuanced questions, but a few high-confidence travel
- * intents should never be allowed to drift into weather, generic chat, or an
- * unnecessary "where are you?" question. This layer resolves those turns
- * before the model sees them.
+ * Layer 1 protects high-confidence turns from LLM intent drift.
+ * Layer 2 (conversationState.service) supplies the durable facts that this
+ * layer uses to resolve corrections and follow-up messages.
  */
 import { getFunctionHandler } from './assistantFunctions.service.js';
 import { getOrCreateConversation, appendMessage } from './memory.service.js';
+import {
+  buildConversationState,
+  isBareDate,
+  isCurrentLocationStatement,
+  isExplicitWeatherRequest,
+  isPlanningRequest,
+  missingPlanningData,
+} from './conversationState.service.js';
 
-const MONTHS = 'January|February|March|April|May|June|July|August|September|October|November|December';
-const DATE_ONLY_RE = new RegExp(`^\\s*(?:${MONTHS})\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?\\s*[.!]?\\s*$`, 'i');
-const LOCATION_STATEMENT_RE = /^\\s*(?:i(?:'m| am)|we(?:'re| are))\\s+(?:now\\s+)?(?:in|at)\\s+(.+?)\\s*[.!]?\\s*$/i;
-const NAMED_NEARBY_RE = /\\b(?:restaurants?|caf(?:e|es)|hotels?|resorts?|parks?|gardens?|botanical gardens?|beaches?|museums?|shopping|shops?|hospitals?|pharmacies?|atms?|petrol pumps?|activities?|places?)\\b[\\s\\S]*?\\b(?:near|around|by|close to)\\s+([^?.!]+?)(?:[?.!]*)$/i;
-const IN_LOCATION_RE = /\\b(?:in|at)\\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60})\\s*[?.!]?$/i;
-const LOCATION_SUFFIX_RE = /^\\s*(?:in|at|around|near)\\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60})[.!]?\\s*$/i;
-const PLANNING_RE = /\\b(?:plan|planning|itinerary|trip plan|plan a trip|visit|travell?ing|go to)\\b/i;
+const NAMED_NEARBY_RE = /\b(?:restaurants?|caf(?:e|es)|hotels?|resorts?|parks?|gardens?|botanical gardens?|beaches?|museums?|shopping|shops?|hospitals?|pharmacies?|atms?|petrol pumps?|activities?|places?)\b[\s\S]*?\b(?:near|around|by|close to)\s+([^?.!]+?)(?:[?.!]*)$/i;
+const CATEGORY_LOCATION_RE = /\b(?:in|at)\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60})\s*[?.!]?$/i;
+const LOCATION_SUFFIX_RE = /^\s*(?:in|at|around|near)\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60})[.!]?\s*$/i;
 
 function cleanPlace(value) {
   return String(value || '')
-    .replace(/\\b(?:please|pls|now|today|tomorrow)\\b/gi, '')
-    .replace(/\\s+/g, ' ')
+    .replace(/\b(?:please|pls|now|today|tomorrow)\b/gi, '')
+    .replace(/\s+/g, ' ')
     .trim()
     .replace(/[,.]+$/, '');
 }
@@ -36,62 +39,27 @@ function allUserText(history, current = '') {
     .join(' ');
 }
 
-function previousTopic(history) {
+function previousCategory(history, state) {
+  if (state?.category) return state.category;
   const text = lastUserText(history).toLowerCase();
-  if (/\\brestaurant|cafe|food|eat|dining\\b/.test(text)) return 'restaurants';
-  if (/\\bpark|garden|botanical|nature|green space|jogging\\b/.test(text)) return 'parks and botanical gardens';
-  if (/\\bhotel|stay|resort|accommodation\\b/.test(text)) return 'hotels';
-  if (/\\bmuseum|heritage|history|culture\\b/.test(text)) return 'museums';
+  if (/\brestaurant|cafe|food|eat|dining\b/.test(text)) return 'restaurants';
+  if (/\bpark|garden|botanical|nature|green space|jogging\b/.test(text)) return 'parks and botanical gardens';
+  if (/\bhotel|stay|resort|accommodation\b/.test(text)) return 'hotels';
+  if (/\bmuseum|heritage|history|culture\b/.test(text)) return 'museums';
   return null;
 }
 
 function categoryFromText(text) {
-  const lower = text.toLowerCase();
-  if (/\\brestaurant|restaurants|cafe|cafes|food|eat|dining\\b/.test(lower)) return 'restaurants';
-  if (/\\bbotanical garden|garden|gardens|park|jogging|nature|green space\\b/.test(lower)) return 'parks and botanical gardens';
-  if (/\\bhotel|hotels|resort|resorts|stay|accommodation\\b/.test(lower)) return 'hotels';
-  if (/\\bmuseum|museums|heritage|history|culture\\b/.test(lower)) return 'museums';
-  if (/\\bhospital|hospitals\\b/.test(lower)) return 'hospitals';
-  if (/\\bpharmacy|pharmacies\\b/.test(lower)) return 'pharmacies';
-  if (/\\batm|atms\\b/.test(lower)) return 'ATMs';
-  if (/\\bpetrol|fuel|gas station\\b/.test(lower)) return 'petrol pumps';
+  const lower = String(text || '').toLowerCase();
+  if (/\brestaurant|restaurants|cafe|cafes|food|eat|dining\b/.test(lower)) return 'restaurants';
+  if (/\bbotanical garden|garden|gardens|park|jogging|nature|green space\b/.test(lower)) return 'parks and botanical gardens';
+  if (/\bhotel|hotels|resort|resorts|stay|accommodation\b/.test(lower)) return 'hotels';
+  if (/\bmuseum|museums|heritage|history|culture\b/.test(lower)) return 'museums';
+  if (/\bhospital|hospitals\b/.test(lower)) return 'hospitals';
+  if (/\bpharmacy|pharmacies\b/.test(lower)) return 'pharmacies';
+  if (/\batm|atms\b/.test(lower)) return 'ATMs';
+  if (/\bpetrol|fuel|gas station\b/.test(lower)) return 'petrol pumps';
   return null;
-}
-
-function currentLocationFromHistory(history) {
-  for (const item of [...(history || [])].reverse()) {
-    if (item?.role !== 'user') continue;
-    const match = String(item.content || '').match(LOCATION_STATEMENT_RE);
-    if (match) return cleanPlace(match[1]);
-  }
-  return null;
-}
-
-function isPlanningContext(history, current = '') {
-  return PLANNING_RE.test(allUserText(history, current));
-}
-
-function extractDate(text) {
-  const match = text.match(new RegExp(`\\b(?:${MONTHS})\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?\\b`, 'i'));
-  return match ? match[0].replace(/\\s+/g, ' ').trim() : null;
-}
-
-function extractDestination(text) {
-  const match = text.match(/\\b(?:visit|visiting|trip\\s+to|go\\s+to|travel(?:ing|ling)?\\s+to|plan(?:\\s+my)?\\s+(?:a\\s+)?trip\\s+to)\\s+([^,.!?]+(?:,\\s*[^,.!?]+)?)/i);
-  if (!match?.[1]) return null;
-  return cleanPlace(match[1].replace(/\\s+(?:on|for|under|with|and)\\s+.*$/i, ''));
-}
-
-function hasBudget(text) {
-  return /(?:budget|under|below|within|around)\\s*(?:rs\\.?|inr|₹)?\\s*\\d{3,7}/i.test(text);
-}
-
-function hasDuration(text) {
-  return /\\b\\d{1,2}\\s*[- ]?(?:day|days|night|nights)\\b/i.test(text);
-}
-
-function hasOrigin(text) {
-  return /\\bfrom\\s+[^,.!?]+\\s+to\\s+[^,.!?]+/i.test(text) || /\\b(?:starting|start)\\s+(?:from|at)\\s+/i.test(text);
 }
 
 function formatNearbyReply(result) {
@@ -114,10 +82,10 @@ function formatNearbyReply(result) {
 
 function stripInternalMarkup(text) {
   return String(text || '')
-    .replace(/```(?:svg|xml)[\\s\\S]*?```/gi, '')
-    .replace(/<svg[\\s\\S]*?<\\/svg>/gi, '')
-    .replace(/^\\s*svg\\s*$/gim, '')
-    .replace(/\\n{3,}/g, '\\n\\n')
+    .replace(/```(?:svg|xml)[\s\S]*?```/gi, '')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, '')
+    .replace(/^\s*svg\s*$/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
@@ -129,7 +97,7 @@ async function persistHandledTurn({ userId, role, message, reply, route }) {
     await appendMessage(conversation.id, { role: 'user', content: message, route });
     await appendMessage(conversation.id, { role: 'assistant', content: reply, route });
   } catch {
-    // Persistence is helpful but must never make chat fail.
+    // Persistence must never make chat fail.
   }
 }
 
@@ -137,40 +105,52 @@ async function executeNearby({ userId, role, message, query, near }) {
   const handler = getFunctionHandler('find_nearby', role);
   if (!handler) return null;
   try {
-    const result = await handler({ query, near, radius_meters: 5000 }, { userId, role, lat: null, lng: null });
+    const result = await handler(
+      { query, near, radius_meters: 5000 },
+      { userId, role, lat: null, lng: null },
+    );
     if (!result || result.error) return null;
-    const reply = formatNearbyReply(result);
+    const reply = stripInternalMarkup(formatNearbyReply(result));
     await persistHandledTurn({ userId, role, message, reply, route: 'deterministic_nearby' });
-    return { handled: true, reply, route: 'deterministic_nearby', toolsUsed: [{ name: 'find_nearby', args: { query, near, radius_meters: 5000 } }] };
+    return {
+      handled: true,
+      reply,
+      route: 'deterministic_nearby',
+      toolsUsed: [{ name: 'find_nearby', args: { query, near, radius_meters: 5000 } }],
+    };
   } catch {
     return null;
   }
 }
 
-async function handlePlanningTurn({ userId, role, message, history }) {
+async function handlePlanningTurn({ userId, role, message, history, state }) {
   const combined = allUserText(history, message);
-  const destination = extractDestination(combined);
-  const travelDate = extractDate(combined);
-  if (!destination && !travelDate) return null;
+  const missing = missingPlanningData(state);
 
-  const missing = [];
-  if (!destination) missing.push('destination');
-  if (!travelDate) missing.push('travel date');
-  if (!hasDuration(combined)) missing.push('trip duration');
-  if (!hasBudget(combined)) missing.push('budget');
-  if (!hasOrigin(combined)) missing.push('starting location');
+  // If this is merely a weather question, never turn it into a trip plan.
+  if (isExplicitWeatherRequest(message) && !isPlanningRequest(message)) return null;
 
-  // If the user only supplied destination/date, do not fake an itinerary.
-  // Ask for the minimum missing inputs required by the real trip schema.
+  // Do not fabricate an itinerary while required fields are absent.
   if (missing.length) {
     const known = [];
-    if (destination) known.push(`destination **${destination}**`);
-    if (travelDate) known.push(`date **${travelDate}**`);
-    const reply = `Got it — I have ${known.join(' and ')}. To build the actual trip plan, I still need your **${missing.join(', ')}**.`;
+    if (state.destination) known.push(`destination **${state.destination}**`);
+    if (state.travelDate) known.push(`date **${state.travelDate}**`);
+    if (state.duration) known.push(`duration **${state.duration}**`);
+    if (state.budget) known.push(`budget **₹${state.budget}**`);
+    if (state.origin || state.currentLocation) {
+      known.push(`starting point **${state.origin || state.currentLocation}**`);
+    }
+
+    const prefix = known.length
+      ? `Got it — I have ${known.join(', ')}.`
+      : 'Got it.';
+    const reply = `${prefix} To build the actual trip plan, I still need your **${missing.join(', ')}**.`;
     await persistHandledTurn({ userId, role, message, reply, route: 'deterministic_planning' });
     return { handled: true, reply, route: 'deterministic_planning', toolsUsed: [] };
   }
 
+  // Layer 2 deliberately stops at a complete canonical state. The next layer
+  // will map this state into the real itinerary-generation pipeline.
   return null;
 }
 
@@ -180,73 +160,72 @@ export async function runConversationPreflight({ userId, role, message, clientHi
   const text = String(message || '').trim();
   if (!text) return null;
 
+  const state = buildConversationState(history, text);
+  const planningContext = isPlanningRequest(text) || /\b(?:visit|travel|go to|trip)\b/i.test(allUserText(history, ''));
+
   // 1) Bare date = correction to the active trip date, never weather.
-  if (DATE_ONLY_RE.test(text) && isPlanningContext(history)) {
-    const combined = allUserText(history, '');
-    const destination = extractDestination(combined);
-    const reply = destination
-      ? `Got it — I’ve updated your trip date to **${text.replace(/[.!]$/, '')}** for **${destination}**. I’ll use this as the trip date.`
+  if (isBareDate(text) && planningContext) {
+    const reply = state.destination
+      ? `Got it — I’ve updated your trip date to **${text.replace(/[.!]$/, '')}** for **${state.destination}**.`
       : `Got it — I’ve updated the trip date to **${text.replace(/[.!]$/, '')}**.`;
     await persistHandledTurn({ userId, role, message: text, reply, route: 'deterministic_date_update' });
     return { handled: true, reply, route: 'deterministic_date_update', toolsUsed: [] };
   }
 
-  // 2) Explicit named-place discovery never requires browser GPS.
-  const namedMatch = text.match(NAMED_NEARBY_RE);
-  if (namedMatch) {
-    const near = cleanPlace(namedMatch[1]);
-    const query = categoryFromText(text) || previousTopic(history) || 'places';
-    const result = await executeNearby({ userId, role, message: text, query, near });
-    if (result) return result;
-  }
-
-  // 3) Broad discovery: "nature places in Chennai", "restaurants in Chennai".
-  const category = categoryFromText(text);
-  const inMatch = text.match(IN_LOCATION_RE);
-  if (category && inMatch) {
-    const near = cleanPlace(inMatch[1]);
-    const result = await executeNearby({ userId, role, message: text, query: category, near });
-    if (result) return result;
-  }
-
-  // 4) A short location refinement continues the previous discovery intent.
-  const suffix = text.match(LOCATION_SUFFIX_RE);
-  if (suffix) {
-    const place = cleanPlace(suffix[1]);
-    const topic = previousTopic(history);
-    if (topic) {
-      const result = await executeNearby({ userId, role, message: text, query: topic, near: place });
-      if (result) return result;
-    }
-  }
-
-  // 5) "restaurants near me" can use a location previously stated in chat.
-  if (/\\b(?:near me|nearby)\\b/i.test(text)) {
-    const rememberedPlace = currentLocationFromHistory(history);
-    const query = categoryFromText(text) || previousTopic(history);
-    if (rememberedPlace && query) {
-      const result = await executeNearby({ userId, role, message: text, query, near: rememberedPlace });
-      if (result) return result;
-    }
-  }
-
-  // 6) Current-location statement should not erase a previously explicit target.
-  const currentLocation = text.match(LOCATION_STATEMENT_RE);
-  if (currentLocation) {
-    const place = cleanPlace(currentLocation[1]);
+  // 2) Current location is state, not an implicit replacement for the target.
+  if (isCurrentLocationStatement(text)) {
+    const place = state.currentLocation;
     const previous = lastUserText(history);
-    if (previous && /\\b(?:near|around|close to)\\b/i.test(previous)) {
+    if (previous && /\b(?:near|around|close to|nearby)\b/i.test(previous)) {
       const reply = `Got it — you’re currently in **${place}**. I’ll keep that as your current location and won’t replace the place you explicitly asked about.`;
       await persistHandledTurn({ userId, role, message: text, reply, route: 'deterministic_location_update' });
       return { handled: true, reply, route: 'deterministic_location_update', toolsUsed: [] };
     }
   }
 
-  // 7) Planning requests are handled last so discovery questions containing
-  // words like "visit" don't get swallowed. This prevents destination/date
-  // statements from ever being interpreted as weather requests.
-  if (PLANNING_RE.test(text)) {
-    const result = await handlePlanningTurn({ userId, role, message: text, history });
+  // 3) Explicit named-place discovery.
+  const namedMatch = text.match(NAMED_NEARBY_RE);
+  if (namedMatch) {
+    const near = cleanPlace(namedMatch[1]);
+    const query = categoryFromText(text) || previousCategory(history, state) || 'places';
+    const result = await executeNearby({ userId, role, message: text, query, near });
+    if (result) return result;
+  }
+
+  // 4) Broad category discovery: "nature places in Chennai".
+  const category = categoryFromText(text);
+  const inMatch = text.match(CATEGORY_LOCATION_RE);
+  if (category && inMatch) {
+    const near = cleanPlace(inMatch[1]);
+    const result = await executeNearby({ userId, role, message: text, query: category, near });
+    if (result) return result;
+  }
+
+  // 5) A short location suffix continues the previous discovery topic.
+  const suffix = text.match(LOCATION_SUFFIX_RE);
+  if (suffix) {
+    const place = cleanPlace(suffix[1]);
+    const topic = previousCategory(history, state);
+    if (topic) {
+      const result = await executeNearby({ userId, role, message: text, query: topic, near: place });
+      if (result) return result;
+    }
+  }
+
+  // 6) "near me" resolves against the canonical current-location state.
+  if (/\b(?:near me|nearby)\b/i.test(text)) {
+    const near = state.currentLocation;
+    const query = categoryFromText(text) || previousCategory(history, state);
+    if (near && query) {
+      const result = await executeNearby({ userId, role, message: text, query, near });
+      if (result) return result;
+    }
+  }
+
+  // 7) Planning comes after discovery so "visit parks in Chennai" remains a
+  // discovery request unless the user explicitly asks for a trip plan.
+  if (isPlanningRequest(text)) {
+    const result = await handlePlanningTurn({ userId, role, message: text, history, state });
     if (result) return result;
   }
 
