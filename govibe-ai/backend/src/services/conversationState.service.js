@@ -1,20 +1,15 @@
 /**
  * Canonical short-term conversation state for the GoVIBE assistant.
- *
- * This layer is deterministic by design. It does not decide what the user
- * wants; it extracts durable facts from the conversation so later layers can
- * route the request without losing context.
+ * Deterministic extraction only; routing and generation consume this state.
  */
-
 const MONTHS = 'January|February|March|April|May|June|July|August|September|October|November|December';
 const DATE_RE = new RegExp(`\\b(?:${MONTHS})\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?\\b`, 'i');
 
 const INTERESTS = [
-  'nature', 'beach', 'heritage', 'history', 'historical', 'culture', 'food',
-  'photography', 'shopping', 'adventure', 'wildlife', 'museum', 'museums',
-  'spiritual', 'temple', 'temples', 'church', 'nightlife', 'entertainment',
-  'park', 'parks', 'garden', 'gardens', 'jogging', 'botanical garden',
-  'peaceful', 'scenic', 'hidden gems',
+  'nature', 'beach', 'heritage', 'history', 'historical', 'culture', 'food', 'photography',
+  'shopping', 'adventure', 'wildlife', 'museum', 'museums', 'spiritual', 'temple', 'temples',
+  'church', 'nightlife', 'entertainment', 'park', 'parks', 'garden', 'gardens', 'jogging',
+  'botanical garden', 'peaceful', 'scenic', 'hidden gems',
 ];
 
 const CATEGORY_RULES = [
@@ -31,44 +26,20 @@ const CATEGORY_RULES = [
 ];
 
 function clean(value) {
-  return String(value || '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/^[,.:;\-]+|[,.:;\-]+$/g, '');
+  return String(value || '').replace(/\s+/g, ' ').trim().replace(/^[,.:;\-]+|[,.:;\-]+$/g, '');
 }
-
-function normalizeDate(value) {
-  return clean(value).replace(/\s+/g, ' ');
-}
-
-function extractDate(text) {
-  const match = String(text || '').match(DATE_RE);
-  return match ? normalizeDate(match[0]) : null;
-}
-
-function extractBudget(text) {
-  const match = String(text || '').match(/\b(?:budget|under|below|within|around)\s*(?:rs\.?|inr|₹)?\s*(\d{3,7})\b/i);
-  return match ? Number(match[1]) : null;
-}
-
-function extractPeople(text) {
-  const match = String(text || '').match(/\b(?:for|with)\s+(\d{1,2})\s+(?:people|persons?|travelers?|travellers?)\b/i);
-  return match ? Number(match[1]) : null;
-}
-
-function extractDuration(text) {
-  const match = String(text || '').match(/\b(\d{1,2})\s*[- ]?(day|days|night|nights)\b/i);
-  return match ? `${match[1]} ${match[2]}` : null;
-}
+function normalizeDate(value) { return clean(value).replace(/\s+/g, ' '); }
+function extractDate(text) { const m = String(text || '').match(DATE_RE); return m ? normalizeDate(m[0]) : null; }
+function extractBudget(text) { const m = String(text || '').match(/\b(?:budget|under|below|within|around)\s*(?:rs\.?|inr|₹)?\s*(\d{3,7})\b/i); return m ? Number(m[1]) : null; }
+function extractPeople(text) { const m = String(text || '').match(/\b(?:for|with)\s+(\d{1,2})\s+(?:people|persons?|travelers?|travellers?)\b/i); return m ? Number(m[1]) : null; }
+function extractDuration(text) { const m = String(text || '').match(/\b(\d{1,2})\s*[- ]?(day|days|night|nights)\b/i); return m ? `${m[1]} ${m[2]}` : null; }
 
 function extractRoute(text) {
   const raw = String(text || '');
   const standard = raw.match(/\bfrom\s+(.+?)\s+to\s+(.+?)(?=[?.!]|$)/i);
   if (standard) return { origin: clean(standard[1]), destination: clean(standard[2]) };
-
   const reverse = raw.match(/\b(?:reach|get to|go to|travel to)\s+(.+?)\s+from\s+(.+?)(?=[?.!]|$)/i);
   if (reverse) return { origin: clean(reverse[2]), destination: clean(reverse[1]) };
-
   return null;
 }
 
@@ -89,41 +60,18 @@ function extractGenericLocation(text) {
   const match = raw.match(/\b(?:in|at|near|around|by|close to)\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60}?)(?=\s*(?:[?.!]|$)|\s+(?:for|with|under|below|within|today|tomorrow|please|suggest|find|show|recommend)\b)/i);
   return match ? clean(match[1]) : null;
 }
-
-function extractCategory(text) {
-  const raw = String(text || '');
-  return CATEGORY_RULES.find(([re]) => re.test(raw))?.[1] || null;
-}
-
-function extractInterests(text) {
-  const lower = String(text || '').toLowerCase();
-  return INTERESTS.filter((interest) => lower.includes(interest));
-}
-
-function mergeFact(state, key, value) {
-  if (value !== null && value !== undefined && value !== '') state[key] = value;
-}
+function extractCategory(text) { return CATEGORY_RULES.find(([re]) => re.test(String(text || '')))?.[1] || null; }
+function extractInterests(text) { const lower = String(text || '').toLowerCase(); return INTERESTS.filter((interest) => lower.includes(interest)); }
+function mergeFact(state, key, value) { if (value !== null && value !== undefined && value !== '') state[key] = value; }
 
 export function buildConversationState(history = [], currentMessage = '') {
   const state = {
-    destination: null,
-    origin: null,
-    currentLocation: null,
-    travelDate: null,
-    budget: null,
-    people: null,
-    duration: null,
-    category: null,
-    interests: [],
-    activeTopic: null,
-    lastUserMessage: null,
+    destination: null, origin: null, currentLocation: null, travelDate: null,
+    budget: null, people: null, duration: null, category: null, interests: [],
+    activeTopic: null, lastUserMessage: null,
   };
 
-  const turns = [
-    ...(Array.isArray(history) ? history : []),
-    { role: 'user', content: currentMessage },
-  ];
-
+  const turns = [...(Array.isArray(history) ? history : []), { role: 'user', content: currentMessage }];
   for (const turn of turns) {
     if (turn?.role !== 'user') continue;
     const text = clean(turn.content);
@@ -131,11 +79,7 @@ export function buildConversationState(history = [], currentMessage = '') {
     state.lastUserMessage = text;
 
     const route = extractRoute(text);
-    if (route) {
-      mergeFact(state, 'origin', route.origin);
-      mergeFact(state, 'destination', route.destination);
-    }
-
+    if (route) { mergeFact(state, 'origin', route.origin); mergeFact(state, 'destination', route.destination); }
     mergeFact(state, 'destination', extractDestination(text));
     mergeFact(state, 'currentLocation', extractCurrentLocation(text));
     mergeFact(state, 'travelDate', extractDate(text));
@@ -145,39 +89,25 @@ export function buildConversationState(history = [], currentMessage = '') {
     mergeFact(state, 'category', extractCategory(text));
 
     const genericLocation = extractGenericLocation(text);
+    // A discovery target ("restaurants near Elliot's Beach") is not a trip
+    // destination. A category + "in Chennai" is, however, a useful locality.
     if (genericLocation && !extractCurrentLocation(text)) {
-      state.destination = state.destination || genericLocation;
+      const isNearbyDiscovery = /\b(?:near|around|by|close to)\b/i.test(text) && Boolean(extractCategory(text));
+      if (!isNearbyDiscovery) state.destination = state.destination || genericLocation;
     }
 
-    for (const interest of extractInterests(text)) {
-      if (!state.interests.includes(interest)) state.interests.push(interest);
-    }
+    for (const interest of extractInterests(text)) if (!state.interests.includes(interest)) state.interests.push(interest);
   }
 
-  state.activeTopic = state.category || (state.interests.length ? state.interests.at(-1) : null);
+  state.activeTopic = state.category || state.interests.at(-1) || null;
   return state;
 }
 
-export function isBareDate(message) {
-  return new RegExp(`^\\s*(?:${MONTHS})\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?\\s*[.!]?\\s*$`, 'i').test(String(message || ''));
-}
-
-export function isCurrentLocationStatement(message) {
-  return Boolean(extractCurrentLocation(message));
-}
-
-export function isExplicitWeatherRequest(message) {
-  return /\b(?:weather|forecast|rain|rainfall|temperature|humid(?:ity)?|sunny|cloudy)\b/i.test(String(message || ''));
-}
-
-export function isPlanningRequest(message) {
-  return /\b(?:plan|planning|itinerary|trip plan|plan a trip|travel plan|getaway|vacation)\b/i.test(String(message || ''));
-}
-
-export function hasEnoughPlanningData(state) {
-  return Boolean(state.destination && state.travelDate && state.duration && state.budget && (state.origin || state.currentLocation));
-}
-
+export function isBareDate(message) { return new RegExp(`^\\s*(?:${MONTHS})\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?\\s*[.!]?\\s*$`, 'i').test(String(message || '')); }
+export function isCurrentLocationStatement(message) { return Boolean(extractCurrentLocation(message)); }
+export function isExplicitWeatherRequest(message) { return /\b(?:weather|forecast|rain|rainfall|temperature|humid(?:ity)?|sunny|cloudy)\b/i.test(String(message || '')); }
+export function isPlanningRequest(message) { return /\b(?:plan|planning|itinerary|trip plan|plan a trip|travel plan|getaway|vacation)\b/i.test(String(message || '')); }
+export function hasEnoughPlanningData(state) { return Boolean(state.destination && state.travelDate && state.duration && state.budget && (state.origin || state.currentLocation)); }
 export function missingPlanningData(state) {
   const missing = [];
   if (!state.destination) missing.push('destination');
@@ -187,5 +117,4 @@ export function missingPlanningData(state) {
   if (!state.origin && !state.currentLocation) missing.push('starting location');
   return missing;
 }
-
-export { extractCategory, extractCurrentLocation, extractDate, extractDestination };
+export { extractCategory, extractCurrentLocation, extractDate, extractDestination, extractRoute };
