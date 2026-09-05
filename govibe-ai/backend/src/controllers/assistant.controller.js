@@ -4,7 +4,7 @@ import { regenerateStop } from '../services/itineraryEngine.service.js';
 import { orchestrateChat } from '../services/orchestrator.service.js';
 import { getRecentMessages, getOrCreateConversation } from '../services/memory.service.js';
 import { runConversationPreflight } from '../services/conversationPreflight.service.js';
-import { buildConversationContext } from '../services/conversationContext.service.js';
+import { buildConversationRoutingContext } from '../services/conversationRoutingContext.service.js';
 
 async function detectUserRole(user) {
   if (!user) return 'traveler';
@@ -40,10 +40,10 @@ export async function chat(req, res, next) {
       const clientHistory = Array.isArray(history) ? history : [];
       const deviceLocation = location?.lat != null && location?.lng != null ? location : null;
 
-      // Build the conversation context exactly once at the HTTP boundary. The
-      // deterministic router receives this same context instead of rebuilding
-      // an independent interpretation of the short user message.
-      const canonicalContext = buildConversationContext(clientHistory, message.trim(), role);
+      // Build one canonical routing context at the HTTP boundary. The
+      // deterministic router receives this exact context; it must not invent
+      // a new interpretation of a short follow-up.
+      const canonicalContext = buildConversationRoutingContext(clientHistory, message.trim(), role);
 
       const preflight = await runConversationPreflight({
         userId: req.user?.id || null,
