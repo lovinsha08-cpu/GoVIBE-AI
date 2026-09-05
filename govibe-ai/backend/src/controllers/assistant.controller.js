@@ -3,6 +3,7 @@ import { generateAssistantReply, applyReorderDay } from '../services/assistant.s
 import { regenerateStop } from '../services/itineraryEngine.service.js';
 import { orchestrateChat } from '../services/orchestrator.service.js';
 import { getRecentMessages, getOrCreateConversation } from '../services/memory.service.js';
+import { runConversationPreflight, stripInternalMarkup } from '../services/conversationPreflight.service.js';
 
 async function detectUserRole(user) {
   if (!user) return 'traveler';
@@ -25,16 +26,39 @@ export async function chat(req, res, next) {
 
     if (!trip_id) {
       const role = await detectUserRole(req.user);
+      const cleanMessage = message.trim();
+      const clientHistory = Array.isArray(history) ? history : [];
+
+      // Deterministic conversation preflight runs before the LLM. This is
+      // intentionally small: it fixes high-confidence follow-ups without
+      // replacing the model for nuanced questions.
+      const preflight = await runConversationPreflight({
+        userId: req.user?.id || null,
+        role,
+        message: cleanMessage,
+        clientHistory,
+      });
+      if (preflight?.handled) {
+        return res.json({
+          reply: stripInternalMarkup(preflight.reply),
+          action: 'none',
+          itinerary: null,
+          role,
+          route: preflight.route,
+          toolsUsed: preflight.toolsUsed || [],
+        });
+      }
+
       const result = await orchestrateChat({
         userId: req.user?.id || null,
         role,
-        message: message.trim(),
-        clientHistory: Array.isArray(history) ? history : [],
+        message: cleanMessage,
+        clientHistory,
         location: location?.lat != null && location?.lng != null ? location : null,
       });
 
       return res.json({
-        reply: result.reply,
+        reply: stripInternalMarkup(result.reply),
         action: 'none',
         itinerary: null,
         role,
@@ -75,12 +99,12 @@ export async function chat(req, res, next) {
     const { reply, action, stopOrder, day, newOrder } = assistantResult;
 
     if (action === 'none') {
-      return res.json({ reply, action: 'none', itinerary: null });
+      return res.json({ reply: stripInternalMarkup(reply), action: 'none', itinerary: null });
     }
 
     if (action === 'swap_stop') {
       if (!Number.isFinite(stopOrder)) {
-        return res.json({ reply, action: 'none', itinerary: null });
+        return res.json({ reply: stripInternalMarkup(reply), action: 'none', itinerary: null });
       }
       try {
         const { stops, replacedStop, previousStopName } = await regenerateStop(trip, itinerary, stopOrder);
@@ -92,10 +116,10 @@ export async function chat(req, res, next) {
           .single();
         if (updateError) return res.status(400).json({ error: updateError.message });
 
-        return res.json({ reply, action: 'swap_stop', itinerary: updated, replacedStop, previousStopName });
+        return res.json({ reply: stripInternalMarkup(reply), action: 'swap_stop', itinerary: updated, replacedStop, previousStopName });
       } catch (swapErr) {
         return res.json({
-          reply: `${reply} (I wasn't able to make that swap: ${swapErr.message})`,
+          reply: stripInternalMarkup(`${reply} (I wasn't able to make that swap: ${swapErr.message})`),
           action: 'none',
           itinerary: null,
         });
@@ -104,7 +128,7 @@ export async function chat(req, res, next) {
 
     if (action === 'reorder_day') {
       if (!Number.isFinite(day) || !Array.isArray(newOrder) || newOrder.length === 0) {
-        return res.json({ reply, action: 'none', itinerary: null });
+        return res.json({ reply: stripInternalMarkup(reply), action: 'none', itinerary: null });
       }
       try {
         const stops = applyReorderDay(itinerary.stops || [], day, newOrder);
@@ -116,17 +140,17 @@ export async function chat(req, res, next) {
           .single();
         if (updateError) return res.status(400).json({ error: updateError.message });
 
-        return res.json({ reply, action: 'reorder_day', itinerary: updated });
+        return res.json({ reply: stripInternalMarkup(reply), action: 'reorder_day', itinerary: updated });
       } catch (reorderErr) {
         return res.json({
-          reply: `${reply} (I wasn't able to make that change: ${reorderErr.message})`,
+          reply: stripInternalMarkup(`${reply} (I wasn't able to make that change: ${reorderErr.message})`),
           action: 'none',
           itinerary: null,
         });
       }
     }
 
-    return res.json({ reply, action: 'none', itinerary: null });
+    return res.json({ reply: stripInternalMarkup(reply), action: 'none', itinerary: null });
   } catch (err) {
     next(err);
   }
@@ -138,7 +162,7 @@ export async function getHistory(req, res, next) {
     const conversation = await getOrCreateConversation({ userId: req.user.id, role, tripId: null });
     if (!conversation) return res.json({ messages: [] });
     const messages = await getRecentMessages(conversation.id, 30);
-    res.json({ messages: messages.map((m) => ({ role: m.role, content: m.content })) });
+    res.json({ messages: messages.map((m) => ({ role: m.role, content: stripInternalMarkup(m.content) })) });
   } catch (err) {
     next(err);
   }
