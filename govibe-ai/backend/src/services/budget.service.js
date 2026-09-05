@@ -42,7 +42,13 @@ export function splitBudget({ totalBudgetInr, interests = [], needsAccommodation
     weights.experience += freed * 0.3;
   }
 
-  for (const key of Object.keys(weights)) weights[key] = Math.max(weights[key], 0.05);
+  // Keep the zero-accommodation contract intact. Only positive buckets need
+  // the minimum floor; otherwise a disabled accommodation bucket would be
+  // silently reintroduced and the split would stop reflecting the request.
+  for (const key of Object.keys(weights)) {
+    if (key !== 'accommodation' || needsAccommodation) weights[key] = Math.max(weights[key], 0.05);
+  }
+
   const sum = Object.values(weights).reduce((a, b) => a + b, 0);
   for (const key of Object.keys(weights)) weights[key] /= sum;
 
@@ -63,9 +69,6 @@ export function estimateSpotEntryCost(spot, group = {}) {
   const fee = Math.max(0, Number(spot?.entry_fee_inr) || 0);
   if (fee === 0) return 0;
 
-  // This remains an estimate because venue-specific concession rules are not
-  // universally available. The returned field is therefore an estimate, not
-  // a claimed official ticket price.
   const fullPayers = adults;
   const halfPayers = kids + elderly + speciallyAbled;
   return Math.round(fullPayers * fee + halfPayers * fee * 0.5);
@@ -87,12 +90,6 @@ export function estimateMealCost(foodPreferences = [], groupSize = 1, mealsCount
   return Math.round(avgCost * people * meals);
 }
 
-/**
- * Validate the costs that GoVIBE actually knows or estimates.
- * Accommodation is intentionally NOT included here unless a real price has
- * been supplied by an external booking/price source. A discovery result
- * alone is never treated as a priced room.
- */
 export function validateBudget({
   totalBudgetInr,
   transportCostInr = 0,
