@@ -1,0 +1,11 @@
+import { Router } from 'express';
+import { requireAuth } from '../middleware/requireAuth.js';
+import { search, wishlist, add, remove, itineraries, save } from '../controllers/explore.controller.js';
+const router=Router();
+router.get('/search',search);
+router.get('/wishlist',requireAuth,wishlist);
+router.post('/wishlist',requireAuth,add);
+router.delete('/wishlist/:placeKey',requireAuth,remove);
+router.get('/itineraries',requireAuth,itineraries);
+router.post('/itineraries',requireAuth,save);
+export default router;

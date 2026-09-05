@@ -2,79 +2,191 @@ import { routeDistance } from './geo.service.js';
 import { classifyAttractionTier } from './attractionRanking.service.js';
 
 /**
- * Orders a list of spots into a route starting from `start`, using a greedy
- * nearest-neighbor heuristic. Not optimal TSP, but fast and good enough for
- * <15 stops — full optimal solving isn't worth the latency here.
+ * Orders itinerary stops using a route-aware optimization pass.
  *
- * Step 5 (Route Optimization): rather than pure nearest-neighbor from the
- * very first pick, the route is seeded with the most important nearby
- * landmark (a Must Visit Landmark if one is within a reasonable first hop,
- * otherwise the single closest spot) so the day reads "arrival → iconic
- * attraction → nearby → nearby → ..." like a local guide would plan it,
- * not just "whatever happens to be nearest first."
+ * The old implementation stopped at nearest-neighbour, which can produce a
+ * locally short next leg while making the complete day's route unnecessarily
+ * long. This implementation keeps the important-attraction seed, builds a
+ * route-distance matrix, creates a strong nearest-neighbour initial route,
+ * then improves it with deterministic 2-opt swaps. The first stop remains
+ * the chosen Must Visit Landmark when one is available within 12km, so
+ * importance is preserved while the rest of the day is optimized for total
+ * travel distance.
+ *
+ * 2-opt is intentionally bounded for itinerary-sized inputs. This gives a
+ * materially better route than greedy nearest-neighbour without introducing
+ * an expensive exact TSP solver or an external optimization dependency.
  */
 export async function orderSpotsRoute(spots, start, mode = 'cab') {
-  const remaining = [...spots];
-  const ordered = [];
-  let current = { lat: start.lat, lng: start.lng };
-  let totalDistanceKm = 0;
-  let totalDurationMinutes = 0;
+  const validSpots = (spots || []).filter((spot) =>
+    Number.isFinite(Number(spot?.latitude)) && Number.isFinite(Number(spot?.longitude))
+  );
 
-  const seedIdx = pickSeedIndex(remaining, current);
+  if (!validSpots.length) {
+    return { ordered: [], totalDistanceKm: 0, totalDurationMinutes: 0 };
+  }
 
-  while (remaining.length) {
-    let bestIdx = 0;
-    let bestResult = null;
+  const origin = { lat: Number(start.lat), lng: Number(start.lng) };
+  const n = validSpots.length;
+
+  // Build the complete route-distance matrix once. This avoids repeatedly
+  // calling the routing provider for the same pair during optimization.
+  const matrix = Array.from({ length: n }, () => Array(n).fill(null));
+  const originRoutes = Array(n).fill(null);
+
+  await Promise.all(validSpots.map(async (spot, i) => {
+    originRoutes[i] = await routeDistance(
+      origin,
+      { lat: Number(spot.latitude), lng: Number(spot.longitude) },
+      mode
+    );
+  }));
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const [forward, reverse] = await Promise.all([
+        routeDistance(
+          { lat: Number(validSpots[i].latitude), lng: Number(validSpots[i].longitude) },
+          { lat: Number(validSpots[j].latitude), lng: Number(validSpots[j].longitude) },
+          mode
+        ),
+        routeDistance(
+          { lat: Number(validSpots[j].latitude), lng: Number(validSpots[j].longitude) },
+          { lat: Number(validSpots[i].latitude), lng: Number(validSpots[i].longitude) },
+          mode
+        ),
+      ]);
+      matrix[i][j] = forward;
+      matrix[j][i] = reverse;
+    }
+  }
+
+  const seedIdx = pickSeedIndex(validSpots, origin);
+  const unvisited = new Set(validSpots.map((_, i) => i));
+  const route = [];
+
+  // Preserve the destination's headline attraction as the first stop when
+  // possible. If there is no nearby Must Visit Landmark, use the closest
+  // actual routed stop from the origin.
+  let firstIdx = seedIdx;
+  if (firstIdx == null) {
+    firstIdx = [...unvisited].sort((a, b) =>
+      (originRoutes[a]?.distanceKm ?? Infinity) - (originRoutes[b]?.distanceKm ?? Infinity)
+    )[0];
+  }
+
+  route.push(firstIdx);
+  unvisited.delete(firstIdx);
+
+  // Nearest-neighbour creates a good starting solution.
+  while (unvisited.size) {
+    const current = route[route.length - 1];
+    let bestIdx = null;
     let bestDistance = Infinity;
 
-    if (ordered.length === 0 && seedIdx != null) {
-      bestIdx = seedIdx;
-      bestResult = await routeDistance(
-        current,
-        { lat: remaining[seedIdx].latitude, lng: remaining[seedIdx].longitude },
-        mode
-      );
-    } else {
-      for (let i = 0; i < remaining.length; i++) {
-        const candidate = remaining[i];
-        const result = await routeDistance(
-          current,
-          { lat: candidate.latitude, lng: candidate.longitude },
-          mode
-        );
-        if (result.distanceKm < bestDistance) {
-          bestDistance = result.distanceKm;
-          bestIdx = i;
-          bestResult = result;
-        }
+    for (const candidate of unvisited) {
+      const distance = matrix[current][candidate]?.distanceKm ?? Infinity;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIdx = candidate;
       }
     }
 
-    const chosen = remaining.splice(bestIdx, 1)[0];
+    if (bestIdx == null) break;
+    route.push(bestIdx);
+    unvisited.delete(bestIdx);
+  }
+
+  // Improve the complete route with 2-opt. Keep index 0 fixed so the
+  // Must-Visit/closest seed is never displaced by an optimization swap.
+  let improved = true;
+  let passes = 0;
+  const maxPasses = Math.max(2, Math.min(20, n * 2));
+
+  while (improved && passes < maxPasses) {
+    improved = false;
+    passes += 1;
+
+    for (let i = 1; i < route.length - 1; i++) {
+      for (let k = i + 1; k < route.length; k++) {
+        const beforeI = route[i - 1];
+        const iNode = route[i];
+        const kNode = route[k];
+        const afterK = k + 1 < route.length ? route[k + 1] : null;
+
+        const currentCost =
+          getDistance(matrix, beforeI, iNode) +
+          (afterK == null ? 0 : getDistance(matrix, kNode, afterK));
+        const swappedCost =
+          getDistance(matrix, beforeI, kNode) +
+          (afterK == null ? 0 : getDistance(matrix, iNode, afterK));
+
+        if (swappedCost + 0.001 < currentCost) {
+          reverseSegment(route, i, k);
+          improved = true;
+        }
+      }
+    }
+  }
+
+  const ordered = [];
+  let totalDistanceKm = 0;
+  let totalDurationMinutes = 0;
+
+  for (let position = 0; position < route.length; position++) {
+    const idx = route[position];
+    const result = position === 0
+      ? originRoutes[idx]
+      : matrix[route[position - 1]][idx];
+
+    const safeResult = result || {
+      distanceKm: haversineFallback(
+        position === 0 ? origin.lat : validSpots[route[position - 1]].latitude,
+        position === 0 ? origin.lng : validSpots[route[position - 1]].longitude,
+        validSpots[idx].latitude,
+        validSpots[idx].longitude
+      ),
+      durationMinutes: 0,
+      source: 'fallback'
+    };
+
+    const distanceKm = Number(safeResult.distanceKm) || 0;
+    const durationMinutes = Number(safeResult.durationMinutes) || 0;
+
     ordered.push({
-      spot: chosen,
-      distanceKmFromPrev: Math.round(bestResult.distanceKm * 10) / 10,
-      travelMinutesFromPrev: bestResult.durationMinutes,
-      routeSource: bestResult.source,
+      spot: validSpots[idx],
+      distanceKmFromPrev: Math.round(distanceKm * 10) / 10,
+      travelMinutesFromPrev: durationMinutes,
+      routeSource: safeResult.source,
     });
-    totalDistanceKm += bestResult.distanceKm;
-    totalDurationMinutes += bestResult.durationMinutes;
-    current = { lat: chosen.latitude, lng: chosen.longitude };
+
+    totalDistanceKm += distanceKm;
+    totalDurationMinutes += durationMinutes;
   }
 
   return {
     ordered,
     totalDistanceKm: Math.round(totalDistanceKm * 10) / 10,
-    totalDurationMinutes,
+    totalDurationMinutes: Math.round(totalDurationMinutes),
   };
 }
 
+function getDistance(matrix, from, to) {
+  return Number(matrix[from]?.[to]?.distanceKm) || 0;
+}
+
+function reverseSegment(route, start, end) {
+  while (start < end) {
+    [route[start], route[end]] = [route[end], route[start]];
+    start += 1;
+    end -= 1;
+  }
+}
+
 /**
- * Picks the seed (first) stop for a route: prefers a Must Visit Landmark
- * within a reasonable first hop (<= 12km of the start point) so the day
- * opens on the destination's headline attraction rather than whatever
- * happens to be a few hundred meters closer. Falls back to `null` (plain
- * nearest-neighbor) if no landmark-tier spot is close enough to open with.
+ * Picks the first stop: nearest Must Visit Landmark within 12km, otherwise
+ * the nearest routed stop. This keeps the "major attractions first" rule
+ * separate from the global optimization of subsequent stops.
  */
 function pickSeedIndex(spots, start) {
   let bestIdx = null;
@@ -93,30 +205,13 @@ function pickSeedIndex(spots, start) {
 function haversineFallback(lat1, lng1, lat2, lng2) {
   const R = 6371;
   const toRad = (d) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  const dLat = toRad(Number(lat2) - Number(lat1));
+  const dLng = toRad(Number(lng2) - Number(lng1));
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(Number(lat1))) * Math.cos(toRad(Number(lat2))) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-/**
- * Recommends the realistic transport mode for a single leg, by distance
- * band (Step 6), rather than applying one fixed mode to every leg of the
- * trip regardless of how short the hop is:
- *
- *   < 500m        -> walk
- *   500m - 3km    -> walk (short end) or auto
- *   3km - 15km    -> auto / cab
- *   15km+         -> bus / train / cab
- *
- * `allowedModes` (from the traveler's transport preference) constrains the
- * choice: if their preferred mode(s) don't fit the distance band at all
- * (e.g. they only picked "cab" but the hop is 200m), the function still
- * recommends walking with a note, since suggesting a cab for a 200m hop is
- * exactly the "unnecessary vehicle for short distance" bug being fixed —
- * but respects an explicit non-walking preference for the 500m-3km band,
- * where either is genuinely reasonable.
- */
 export function recommendTransportMode(distanceKm, allowedModes = [], fallbackMode = 'cab') {
   const allowed = new Set(allowedModes.filter(Boolean));
   const pick = (candidates, note) => {
@@ -136,10 +231,6 @@ export function recommendTransportMode(distanceKm, allowedModes = [], fallbackMo
   return { ...pick(['bus', 'train', 'cab', 'car'], 'Longer distance — bus, train, or a cab depending on availability.') };
 }
 
-/**
- * Heuristic crowd level by time of day + day of week, since we don't have
- * a live crowd data source yet. Documented as an estimate, not measured.
- */
 export function estimateCrowdLevel(arrivalHour, isWeekend) {
   let level = 'moderate';
   if (arrivalHour >= 10 && arrivalHour <= 13) level = isWeekend ? 'high' : 'moderate';
@@ -148,16 +239,10 @@ export function estimateCrowdLevel(arrivalHour, isWeekend) {
   return level;
 }
 
-/** Placeholder weather note until a live weather API call is wired in. */
 export function weatherNotePlaceholder() {
   return 'Weather forecast not yet available — check closer to your travel date.';
 }
 
-/**
- * Best-time-to-visit + crowd-avoidance guidance per category, so travelers
- * know when to show up and when to stay away — not just what the crowd
- * level will be at their scheduled arrival time.
- */
 const EARLY_BEST_CATEGORIES = new Set(['heritage_historical', 'nature_scenic', 'sports_adventure', 'religious_spiritual', 'wildlife']);
 
 export function suggestBestVisitTime(category, isWeekend) {
@@ -185,21 +270,15 @@ export function suggestBestVisitTime(category, isWeekend) {
   };
 }
 
-/**
- * Suggests a public transport option for a leg, as an alternative to the
- * trip's chosen primary mode — useful for budget travelers or as a fallback
- * when cabs are scarce. Heuristic based on distance, since a live transit
- * API (GTFS) isn't wired up for most Indian cities.
- */
 export function suggestPublicTransport(distanceKm) {
   if (distanceKm <= 1.2) {
     return { mode: 'walk', note: 'Close enough to walk — skip the fare.' };
   }
   if (distanceKm <= 5) {
-    return { mode: 'auto-rickshaw / shared auto', note: 'A shared auto or app-auto is usually cheapest for this distance.' };
+    return { mode: 'auto-rickshaw / shared auto', note: 'A shared auto or app-auto may be economical for this distance.' };
   }
   if (distanceKm <= 12) {
-    return { mode: 'city bus / metro', note: 'Check if a metro or city bus line covers this route — often 70–80% cheaper than a cab.' };
+    return { mode: 'city bus / metro', note: 'Check whether a verified metro or city bus service covers this route.' };
   }
-  return { mode: 'metro + cab combo', note: 'Consider metro/rail for the bulk of the distance, then a short cab for the last mile.' };
+  return { mode: 'metro + cab combo', note: 'Check verified rail/transit coverage for the bulk of the distance, then use a short last-mile connection if available.' };
 }

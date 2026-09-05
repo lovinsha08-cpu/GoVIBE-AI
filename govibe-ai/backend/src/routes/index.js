@@ -8,9 +8,9 @@ import offersRoutes from './offers.routes.js';
 import businessRoutes from './business.routes.js';
 import flightsRoutes from './flights.routes.js';
 import assistantRoutes from './assistant.routes.js';
+import exploreRoutes from './explore.routes.js';
 
 const router = Router();
-
 router.get('/health', (req, res) => res.json({ status: 'ok', service: 'govibe-ai-backend' }));
 router.use('/auth', authRoutes);
 router.use('/trips', tripRoutes);
@@ -21,5 +21,5 @@ router.use('/offers', offersRoutes);
 router.use('/business', businessRoutes);
 router.use('/flights', flightsRoutes);
 router.use('/assistant', assistantRoutes);
-
+router.use('/explore', exploreRoutes);
 export default router;

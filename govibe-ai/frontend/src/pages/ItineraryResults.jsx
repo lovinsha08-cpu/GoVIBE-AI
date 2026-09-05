@@ -408,9 +408,7 @@ export default function ItineraryResults() {
             <p className="text-xs text-[#0C3B5E]/55 mb-2">{accommodation.address}</p>
           )}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#0C3B5E]/70 mb-2">
-            <span className="flex items-center gap-1">
-              <IndianRupee size={11} /> ~₹{accommodation.price_per_night_inr?.toLocaleString('en-IN')}/night
-            </span>
+            <span className="font-semibold text-[#0C3B5E]">Current price · check live price for your dates</span>
             {accommodation.distance_km_from_center != null && (
               <span>{accommodation.distance_km_from_center} km from destination center</span>
             )}
@@ -419,7 +417,17 @@ export default function ItineraryResults() {
           {accommodation.reason && (
             <p className="text-xs text-[#0C3B5E]/60 italic mb-2">{accommodation.reason}</p>
           )}
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            {accommodation.price_check_url && (
+              <a href={accommodation.price_check_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-[#0C3B5E] rounded-lg px-3 py-2">
+                Check Current Price <ExternalLink size={11} />
+              </a>
+            )}
+            {accommodation.website_url && (
+              <a href={accommodation.website_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2563EB] border border-[#2563EB]/20 rounded-lg px-3 py-2">
+                Hotel Website <ExternalLink size={11} />
+              </a>
+            )}
             {accommodation.maps_url && (
               <a
                 href={accommodation.maps_url}
@@ -436,9 +444,6 @@ export default function ItineraryResults() {
               </a>
             )}
           </div>
-          {accommodation.price_estimate_note && (
-            <p className="text-[10px] text-[#0C3B5E]/35 mt-2">{accommodation.price_estimate_note}</p>
-          )}
         </div>
       )}
 
