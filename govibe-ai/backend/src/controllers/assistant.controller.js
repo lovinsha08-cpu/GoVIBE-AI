@@ -18,10 +18,10 @@ async function detectUserRole(user) {
 
 function cleanAssistantReply(value) {
   return String(value || '')
-    .replace(/```(?:svg|xml)[\\s\\S]*?```/gi, '')
-    .replace(/<svg[\\s\\S]*?<\\/svg>/gi, '')
-    .replace(/^\\s*svg\\s*$/gim, '')
-    .replace(/\\n{3,}/g, '\\n\\n')
+    .replace(/```(?:svg|xml)[\s\S]*?```/gi, '')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, '')
+    .replace(/^\s*svg\s*$/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
@@ -37,8 +37,6 @@ export async function chat(req, res, next) {
       const role = await detectUserRole(req.user);
       const clientHistory = Array.isArray(history) ? history : [];
 
-      // Resolve high-confidence conversational follow-ups before probabilistic
-      // routing. This is deliberately before orchestrateChat/classification.
       const preflight = await runConversationPreflight({
         userId: req.user?.id || null,
         role,
@@ -48,8 +46,10 @@ export async function chat(req, res, next) {
       if (preflight?.handled) {
         return res.json({
           reply: cleanAssistantReply(preflight.reply),
-          action: 'none',
-          itinerary: null,
+          action: preflight.itinerary ? 'open_itinerary' : 'none',
+          itinerary: preflight.itinerary || null,
+          trip: preflight.trip || null,
+          trip_id: preflight.trip?.id || null,
           role,
           route: preflight.route,
           toolsUsed: preflight.toolsUsed || [],
@@ -110,50 +110,28 @@ export async function chat(req, res, next) {
     }
 
     if (action === 'swap_stop') {
-      if (!Number.isFinite(stopOrder)) {
-        return res.json({ reply: cleanAssistantReply(reply), action: 'none', itinerary: null });
-      }
+      if (!Number.isFinite(stopOrder)) return res.json({ reply: cleanAssistantReply(reply), action: 'none', itinerary: null });
       try {
         const { stops, replacedStop, previousStopName } = await regenerateStop(trip, itinerary, stopOrder);
         const { data: updated, error: updateError } = await supabaseAdmin
-          .from('itineraries')
-          .update({ stops })
-          .eq('id', itinerary.id)
-          .select()
-          .single();
+          .from('itineraries').update({ stops }).eq('id', itinerary.id).select().single();
         if (updateError) return res.status(400).json({ error: updateError.message });
-
         return res.json({ reply: cleanAssistantReply(reply), action: 'swap_stop', itinerary: updated, replacedStop, previousStopName });
       } catch (swapErr) {
-        return res.json({
-          reply: `${cleanAssistantReply(reply)} (I wasn't able to make that swap: ${swapErr.message})`,
-          action: 'none',
-          itinerary: null,
-        });
+        return res.json({ reply: `${cleanAssistantReply(reply)} (I wasn't able to make that swap: ${swapErr.message})`, action: 'none', itinerary: null });
       }
     }
 
     if (action === 'reorder_day') {
-      if (!Number.isFinite(day) || !Array.isArray(newOrder) || newOrder.length === 0) {
-        return res.json({ reply: cleanAssistantReply(reply), action: 'none', itinerary: null });
-      }
+      if (!Number.isFinite(day) || !Array.isArray(newOrder) || newOrder.length === 0) return res.json({ reply: cleanAssistantReply(reply), action: 'none', itinerary: null });
       try {
         const stops = applyReorderDay(itinerary.stops || [], day, newOrder);
         const { data: updated, error: updateError } = await supabaseAdmin
-          .from('itineraries')
-          .update({ stops })
-          .eq('id', itinerary.id)
-          .select()
-          .single();
+          .from('itineraries').update({ stops }).eq('id', itinerary.id).select().single();
         if (updateError) return res.status(400).json({ error: updateError.message });
-
         return res.json({ reply: cleanAssistantReply(reply), action: 'reorder_day', itinerary: updated });
       } catch (reorderErr) {
-        return res.json({
-          reply: `${cleanAssistantReply(reply)} (I wasn't able to make that change: ${reorderErr.message})`,
-          action: 'none',
-          itinerary: null,
-        });
+        return res.json({ reply: `${cleanAssistantReply(reply)} (I wasn't able to make that change: ${reorderErr.message})`, action: 'none', itinerary: null });
       }
     }
 
