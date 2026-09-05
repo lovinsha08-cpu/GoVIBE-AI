@@ -57,7 +57,12 @@ function normalizedName(value) {
 }
 
 function hasCoordinates(spot) {
-  return Number.isFinite(Number(spot?.latitude)) && Number.isFinite(Number(spot?.longitude));
+  if (spot?.latitude === null || spot?.latitude === undefined || spot?.longitude === null || spot?.longitude === undefined) return false;
+  if (String(spot.latitude).trim() === '' || String(spot.longitude).trim() === '') return false;
+  const latitude = Number(spot.latitude);
+  const longitude = Number(spot.longitude);
+  return Number.isFinite(latitude) && Number.isFinite(longitude)
+    && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180;
 }
 
 /**
