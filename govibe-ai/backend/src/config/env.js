@@ -21,6 +21,8 @@ export const env={
   googlePlacesApiKey:clean(process.env.GOOGLE_PLACES_API_KEY),
   googleEnrichmentLimitPerCategory:Number(clean(process.env.GOOGLE_ENRICHMENT_LIMIT_PER_CATEGORY))||8,
   googleEnrichmentConcurrency:Number(clean(process.env.GOOGLE_ENRICHMENT_CONCURRENCY))||5,
+  businessLocationSearchRadiusMeters:Number(clean(process.env.BUSINESS_LOCATION_SEARCH_RADIUS_METERS))||5000,
+  businessLocationMatchRadiusMeters:Number(clean(process.env.BUSINESS_LOCATION_MATCH_RADIUS_METERS))||300,
   amadeusClientId:clean(process.env.AMADEUS_CLIENT_ID),
   amadeusClientSecret:clean(process.env.AMADEUS_CLIENT_SECRET),
   amadeusBaseUrl:clean(process.env.AMADEUS_BASE_URL)||'https://test.api.amadeus.com',
