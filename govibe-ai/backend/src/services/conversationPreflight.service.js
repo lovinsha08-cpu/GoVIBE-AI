@@ -1,45 +1,18 @@
 /**
- * Deterministic conversational preflight.
- *
- * This is the safety/routing boundary before the LLM. High-confidence turns
- * are resolved here; complete trip states are handed to the real itinerary
- * pipeline instead of being answered with generic chat or weather.
+ * Deterministic conversational preflight and routing boundary.
  */
 import { getFunctionHandler } from './assistantFunctions.service.js';
 import { getOrCreateConversation, appendMessage } from './memory.service.js';
 import { buildTripFromConversation, formatGeneratedTripReply } from './chatTripPlanner.service.js';
-import {
-  buildConversationState,
-  isBareDate,
-  isCurrentLocationStatement,
-  isExplicitWeatherRequest,
-  isPlanningRequest,
-  missingPlanningData,
-} from './conversationState.service.js';
+import { buildConversationState, isBareDate, isCurrentLocationStatement, isExplicitWeatherRequest, isPlanningRequest, missingPlanningData } from './conversationState.service.js';
 
 const NAMED_NEARBY_RE = /\b(?:restaurants?|caf(?:e|es)|hotels?|resorts?|parks?|gardens?|botanical gardens?|beaches?|museums?|shopping|shops?|hospitals?|pharmacies?|atms?|petrol pumps?|activities?|places?)\b[\s\S]*?\b(?:near|around|by|close to)\s+([^?.!]+?)(?:[?.!]*)$/i;
 const CATEGORY_LOCATION_RE = /\b(?:in|at)\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60})\s*[?.!]?$/i;
 const LOCATION_SUFFIX_RE = /^\s*(?:in|at|around|near)\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60})[.!]?\s*$/i;
 
-function cleanPlace(value) {
-  return String(value || '')
-    .replace(/\b(?:please|pls|now|today|tomorrow)\b/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/[,.]+$/, '');
-}
-
-function lastUserText(history) {
-  return [...(history || [])].reverse().find((m) => m?.role === 'user')?.content || '';
-}
-
-function allUserText(history, current = '') {
-  return [...(history || []), { role: 'user', content: current }]
-    .filter((m) => m?.role === 'user')
-    .map((m) => String(m.content || ''))
-    .join(' ');
-}
-
+function cleanPlace(value) { return String(value || '').replace(/\b(?:please|pls|now|today|tomorrow)\b/gi, '').replace(/\s+/g, ' ').trim().replace(/[,.]+$/, ''); }
+function lastUserText(history) { return [...(history || [])].reverse().find((m) => m?.role === 'user')?.content || ''; }
+function allUserText(history, current = '') { return [...(history || []), { role: 'user', content: current }].filter((m) => m?.role === 'user').map((m) => String(m.content || '')).join(' '); }
 function previousCategory(history, state) {
   if (state?.category) return state.category;
   const text = lastUserText(history).toLowerCase();
@@ -49,7 +22,6 @@ function previousCategory(history, state) {
   if (/\bmuseum|heritage|history|culture\b/.test(text)) return 'museums';
   return null;
 }
-
 function categoryFromText(text) {
   const lower = String(text || '').toLowerCase();
   if (/\brestaurant|restaurants|cafe|cafes|food|eat|dining\b/.test(lower)) return 'restaurants';
@@ -62,7 +34,16 @@ function categoryFromText(text) {
   if (/\bpetrol|fuel|gas station\b/.test(lower)) return 'petrol pumps';
   return null;
 }
-
+function previousNearbyPlace(history) {
+  for (const turn of [...(history || [])].reverse()) {
+    const text = String(turn?.content || '');
+    const direct = text.match(NAMED_NEARBY_RE);
+    if (turn?.role === 'user' && direct?.[1]) return cleanPlace(direct[1]);
+    const listed = text.match(/(?:options near|near)\s+\*\*([^*]+)\*\*/i);
+    if (turn?.role === 'assistant' && listed?.[1]) return cleanPlace(listed[1]);
+  }
+  return null;
+}
 function formatNearbyReply(result) {
   const rows = Array.isArray(result?.results) ? result.results : [];
   if (!rows.length) return `I couldn't find any verified ${result?.resolved_category || 'places'} near ${result?.searched_near || 'that location'} right now.`;
@@ -76,28 +57,11 @@ function formatNearbyReply(result) {
   });
   return `Here are verified options near **${result.searched_near}**:\n\n${lines.join('\n')}`;
 }
-
-function stripInternalMarkup(text) {
-  return String(text || '')
-    .replace(/```(?:svg|xml)[\s\S]*?```/gi, '')
-    .replace(/<svg[\s\S]*?<\/svg>/gi, '')
-    .replace(/^\s*svg\s*$/gim, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
+function stripInternalMarkup(text) { return String(text || '').replace(/```(?:svg|xml)[\s\S]*?```/gi, '').replace(/<svg[\s\S]*?<\/svg>/gi, '').replace(/^\s*svg\s*$/gim, '').replace(/\n{3,}/g, '\n\n').trim(); }
 async function persistHandledTurn({ userId, role, message, reply, route }) {
   if (!userId) return;
-  try {
-    const conversation = await getOrCreateConversation({ userId, role, tripId: null });
-    if (!conversation) return;
-    await appendMessage(conversation.id, { role: 'user', content: message, route });
-    await appendMessage(conversation.id, { role: 'assistant', content: reply, route });
-  } catch {
-    // Persistence must never make chat fail.
-  }
+  try { const conversation = await getOrCreateConversation({ userId, role, tripId: null }); if (conversation) { await appendMessage(conversation.id, { role: 'user', content: message, route }); await appendMessage(conversation.id, { role: 'assistant', content: reply, route }); } } catch { /* persistence is non-critical */ }
 }
-
 async function executeNearby({ userId, role, message, query, near }) {
   const handler = getFunctionHandler('find_nearby', role);
   if (!handler) return null;
@@ -107,14 +71,10 @@ async function executeNearby({ userId, role, message, query, near }) {
     const reply = stripInternalMarkup(formatNearbyReply(result));
     await persistHandledTurn({ userId, role, message, reply, route: 'deterministic_nearby' });
     return { handled: true, reply, route: 'deterministic_nearby', toolsUsed: [{ name: 'find_nearby', args: { query, near, radius_meters: 5000 } }] };
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
-
-async function handlePlanningTurn({ userId, role, message, history, state }) {
+async function handlePlanningTurn({ userId, role, message, state }) {
   if (isExplicitWeatherRequest(message) && !isPlanningRequest(message)) return null;
-
   const missing = missingPlanningData(state);
   if (missing.length) {
     const known = [];
@@ -123,43 +83,28 @@ async function handlePlanningTurn({ userId, role, message, history, state }) {
     if (state.duration) known.push(`duration **${state.duration}**`);
     if (state.budget) known.push(`budget **₹${state.budget}**`);
     if (state.origin || state.currentLocation) known.push(`starting point **${state.origin || state.currentLocation}**`);
-    const prefix = known.length ? `Got it — I have ${known.join(', ')}.` : 'Got it.';
-    const reply = `${prefix} To build the actual trip plan, I still need your **${missing.join(', ')}**.`;
+    const reply = `${known.length ? `Got it — I have ${known.join(', ')}.` : 'Got it.'} To build the actual trip plan, I still need your **${missing.join(', ')}**.`;
     await persistHandledTurn({ userId, role, message, reply, route: 'deterministic_planning' });
     return { handled: true, reply, route: 'deterministic_planning', toolsUsed: [] };
   }
-
   const result = await buildTripFromConversation({ userId, state });
   const reply = stripInternalMarkup(result.ok ? formatGeneratedTripReply(result) : result.message);
   const route = result.ok ? 'conversation_trip_generation' : `conversation_trip_error:${result.code}`;
   await persistHandledTurn({ userId, role, message, reply, route });
-
-  if (!result.ok) {
-    return { handled: true, reply, route, toolsUsed: [] };
-  }
-
-  return {
-    handled: true,
-    reply,
-    route,
-    toolsUsed: [{ name: 'generate_conversational_itinerary', args: { trip_id: result.trip.id } }],
-    itinerary: result.itinerary,
-    trip: result.trip,
-  };
+  return result.ok
+    ? { handled: true, reply, route, toolsUsed: [{ name: 'generate_conversational_itinerary', args: { trip_id: result.trip.id } }], itinerary: result.itinerary, trip: result.trip }
+    : { handled: true, reply, route, toolsUsed: [] };
 }
 
 export async function runConversationPreflight({ userId, role, message, clientHistory = [] }) {
   const history = Array.isArray(clientHistory) ? clientHistory : [];
   const text = String(message || '').trim();
   if (!text) return null;
-
   const state = buildConversationState(history, text);
   const planningContext = isPlanningRequest(text) || /\b(?:visit|travel|go to|trip)\b/i.test(allUserText(history, ''));
 
   if (isBareDate(text) && planningContext) {
-    const reply = state.destination
-      ? `Got it — I’ve updated your trip date to **${text.replace(/[.!]$/, '')}** for **${state.destination}**.`
-      : `Got it — I’ve updated the trip date to **${text.replace(/[.!]$/, '')}**.`;
+    const reply = state.destination ? `Got it — I’ve updated your trip date to **${text.replace(/[.!]$/, '')}** for **${state.destination}**.` : `Got it — I’ve updated the trip date to **${text.replace(/[.!]$/, '')}**.`;
     await persistHandledTurn({ userId, role, message: text, reply, route: 'deterministic_date_update' });
     return { handled: true, reply, route: 'deterministic_date_update', toolsUsed: [] };
   }
@@ -174,8 +119,19 @@ export async function runConversationPreflight({ userId, role, message, clientHi
     }
   }
 
+  // Resolve "near there" against the last explicit nearby target instead of
+  // sending the literal word "there" to geocoding.
+  if (/\bnear there\b/i.test(text)) {
+    const near = previousNearbyPlace(history);
+    const query = categoryFromText(text) || previousCategory(history, state);
+    if (near && query) {
+      const result = await executeNearby({ userId, role, message: text, query, near });
+      if (result) return result;
+    }
+  }
+
   const namedMatch = text.match(NAMED_NEARBY_RE);
-  if (namedMatch) {
+  if (namedMatch && cleanPlace(namedMatch[1]).toLowerCase() !== 'there') {
     const near = cleanPlace(namedMatch[1]);
     const query = categoryFromText(text) || previousCategory(history, state) || 'places';
     const result = await executeNearby({ userId, role, message: text, query, near });
@@ -210,11 +166,9 @@ export async function runConversationPreflight({ userId, role, message, clientHi
   }
 
   if (isPlanningRequest(text)) {
-    const result = await handlePlanningTurn({ userId, role, message: text, history, state });
+    const result = await handlePlanningTurn({ userId, role, message: text, state });
     if (result) return result;
   }
-
   return null;
 }
-
 export { stripInternalMarkup };
