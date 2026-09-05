@@ -8,6 +8,7 @@ import { buildConversationState, isBareDate, isCurrentLocationStatement, isExpli
 
 const NAMED_NEARBY_RE = /\b(?:restaurants?|caf(?:e|es)|hotels?|resorts?|parks?|gardens?|botanical gardens?|beaches?|museums?|shopping|shops?|hospitals?|pharmacies?|atms?|petrol pumps?|activities?|places?)\b[\s\S]*?\b(?:near|around|by|close to)\s+([^?.!]+?)(?:[?.!]*)$/i;
 const CATEGORY_LOCATION_RE = /\b(?:in|at)\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60})\s*[?.!]?$/i;
+const CATEGORY_NEAR_RE = /\b(?:near|around|by|close to)\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60})\s*[?.!]?$/i;
 const LOCATION_SUFFIX_RE = /^\s*(?:in|at|around|near)\s+([A-Za-z][A-Za-z0-9 .,'&-]{1,60})[.!]?\s*$/i;
 
 function cleanPlace(value) { return String(value || '').replace(/\b(?:please|pls|now|today|tomorrow)\b/gi, '').replace(/\s+/g, ' ').trim().replace(/[,.]+$/, ''); }
@@ -15,11 +16,14 @@ function lastUserText(history) { return [...(history || [])].reverse().find((m) 
 function allUserText(history, current = '') { return [...(history || []), { role: 'user', content: current }].filter((m) => m?.role === 'user').map((m) => String(m.content || '')).join(' '); }
 function previousCategory(history, state) {
   if (state?.category) return state.category;
-  const text = lastUserText(history).toLowerCase();
-  if (/\brestaurant|cafe|food|eat|dining\b/.test(text)) return 'restaurants';
-  if (/\bpark|garden|botanical|nature|green space|jogging\b/.test(text)) return 'parks and botanical gardens';
-  if (/\bhotel|stay|resort|accommodation\b/.test(text)) return 'hotels';
-  if (/\bmuseum|heritage|history|culture\b/.test(text)) return 'museums';
+  for (const turn of [...(history || [])].reverse()) {
+    if (turn?.role !== 'user') continue;
+    const text = String(turn.content || '').toLowerCase();
+    if (/\brestaurant|cafe|food|eat|dining\b/.test(text)) return 'restaurants';
+    if (/\bpark|garden|botanical|nature|green space|jogging\b/.test(text)) return 'parks and botanical gardens';
+    if (/\bhotel|stay|resort|accommodation\b/.test(text)) return 'hotels';
+    if (/\bmuseum|heritage|history|culture\b/.test(text)) return 'museums';
+  }
   return null;
 }
 function categoryFromText(text) {
@@ -37,10 +41,16 @@ function categoryFromText(text) {
 function previousNearbyPlace(history) {
   for (const turn of [...(history || [])].reverse()) {
     const text = String(turn?.content || '');
-    const direct = text.match(NAMED_NEARBY_RE);
-    if (turn?.role === 'user' && direct?.[1]) return cleanPlace(direct[1]);
-    const listed = text.match(/(?:options near|near)\s+\*\*([^*]+)\*\*/i);
-    if (turn?.role === 'assistant' && listed?.[1]) return cleanPlace(listed[1]);
+    if (turn?.role === 'user') {
+      const direct = text.match(NAMED_NEARBY_RE);
+      if (direct?.[1]) return cleanPlace(direct[1]);
+      const near = text.match(CATEGORY_NEAR_RE);
+      if (near?.[1] && categoryFromText(text)) return cleanPlace(near[1]);
+    }
+    if (turn?.role === 'assistant') {
+      const listed = text.match(/(?:options near|near)\s+\*\*([^*]+)\*\*/i);
+      if (listed?.[1]) return cleanPlace(listed[1]);
+    }
   }
   return null;
 }
@@ -64,7 +74,7 @@ async function persistHandledTurn({ userId, role, message, reply, route }) {
 }
 async function executeNearby({ userId, role, message, query, near }) {
   const handler = getFunctionHandler('find_nearby', role);
-  if (!handler) return null;
+  if (!handler || !near) return null;
   try {
     const result = await handler({ query, near, radius_meters: 5000 }, { userId, role, lat: null, lng: null });
     if (!result || result.error) return null;
@@ -144,6 +154,25 @@ export async function runConversationPreflight({ userId, role, message, clientHi
     const near = cleanPlace(inMatch[1]);
     const result = await executeNearby({ userId, role, message: text, query: category, near });
     if (result) return result;
+  }
+
+  // Handle "cafe near Velachery" / "parks around Guindy" even when the
+  // category comes before the nearby phrase and the generic nearby regex
+  // did not recognize the exact wording.
+  const categoryNearMatch = text.match(CATEGORY_NEAR_RE);
+  if (category && categoryNearMatch && cleanPlace(categoryNearMatch[1]).toLowerCase() !== 'there') {
+    const result = await executeNearby({ userId, role, message: text, query: category, near: cleanPlace(categoryNearMatch[1]) });
+    if (result) return result;
+  }
+
+  // A category-only follow-up inherits the last explicit nearby target,
+  // current location, or locality from the conversation.
+  if (category && !isPlanningRequest(text) && !inMatch && !categoryNearMatch) {
+    const near = previousNearbyPlace(history) || state.currentLocation || state.destination;
+    if (near) {
+      const result = await executeNearby({ userId, role, message: text, query: category, near });
+      if (result) return result;
+    }
   }
 
   const suffix = text.match(LOCATION_SUFFIX_RE);
