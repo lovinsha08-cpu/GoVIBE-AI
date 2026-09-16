@@ -319,6 +319,23 @@ export default function ItineraryResults() {
     }
   };
 
+  const stops = itinerary?.stops || [];
+  // Group stops by day (falls back to a single "Day 1" group for older
+  // saved itineraries generated before day-by-day tagging existed).
+  const dayGroups = useMemo(() => {
+    const map = new Map();
+    stops.forEach((stop) => {
+      const day = stop.day ?? 1;
+      if (!map.has(day)) map.set(day, { day, date: stop.date || null, stops: [] });
+      map.get(day).stops.push(stop);
+    });
+    return [...map.values()].sort((a, b) => a.day - b.day);
+  }, [stops]);
+
+  const budget = itinerary?.budget_summary || {};
+  const journey = budget.ai_extras?.journey || null;
+  const navigationUrl = useMemo(() => buildGoogleMapsNavigationUrl(journey, stops), [journey, stops]);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#EAF7EF] flex items-center justify-center">
@@ -336,29 +353,15 @@ export default function ItineraryResults() {
     );
   }
 
-  const stops = itinerary?.stops || [];
-  // Group stops by day (falls back to a single "Day 1" group for older
-  // saved itineraries generated before day-by-day tagging existed).
-  const dayGroups = useMemo(() => {
-    const map = new Map();
-    stops.forEach((stop) => {
-      const day = stop.day ?? 1;
-      if (!map.has(day)) map.set(day, { day, date: stop.date || null, stops: [] });
-      map.get(day).stops.push(stop);
-    });
-    return [...map.values()].sort((a, b) => a.day - b.day);
-  }, [stops]);
-  const budget = itinerary?.budget_summary || {};
   const aiSummary = budget.ai_extras?.summary || budget.ai_extras?.final_ai_summary || null;
   const packingList = budget.ai_extras?.packing_list || [];
   const localEvents = budget.ai_extras?.local_events || [];
   const decisionExplanation = budget.ai_extras?.decision_explanation || [];
   const confidenceScores = budget.ai_extras?.confidence_scores || null;
   const learnedPreferences = budget.ai_extras?.learned_preferences || null;
-  const journey = budget.ai_extras?.journey || null;
   const routeSummary = journey?.route_summary || null;
   const accommodation = budget.ai_extras?.accommodation || null;
-  const navigationUrl = useMemo(() => buildGoogleMapsNavigationUrl(journey, stops), [journey, stops]);
+  
   // The itinerary location handed off to the Emergency Services page: the
   // first stop on the plan (real coordinates, so the new page can skip an
   // extra geocode round-trip), falling back to the journey's end point,

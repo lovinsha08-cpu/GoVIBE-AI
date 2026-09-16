@@ -38,6 +38,8 @@ export const env = {
   groqModel: clean(process.env.GROQ_MODEL),
   corsOrigin: clean(process.env.CORS_ORIGIN) || 'http://localhost:5173',
   googlePlacesApiKey: clean(process.env.GOOGLE_PLACES_API_KEY),
+  businessLocationSearchRadiusMeters: Number(clean(process.env.BUSINESS_LOCATION_SEARCH_RADIUS_METERS)) || 2000,
+  businessLocationMatchRadiusMeters: Number(clean(process.env.BUSINESS_LOCATION_MATCH_RADIUS_METERS)) || 300,
   // How many top candidates PER CATEGORY get sent to Google Places (New)
   // for familiarity/quality enrichment during itinerary generation — never
   // the whole raw OSM candidate pool. See googlePlacesEnrichment.service.js.

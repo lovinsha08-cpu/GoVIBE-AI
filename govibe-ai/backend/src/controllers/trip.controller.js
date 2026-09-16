@@ -17,11 +17,6 @@ async function resolveCoords(placeName, existingLat, existingLng) {
 export async function createTrip(req, res, next) {
   try {
     const b = req.body;
-    if (!b.destination || !b.start_date || !b.end_date || !b.total_budget_inr) {
-      return res.status(400).json({
-        error: 'destination, start_date, end_date, and total_budget_inr are required',
-      });
-    }
 
     const [startCoords, destCoords, endCoords] = await Promise.all([
       resolveCoords(b.start_location, b.start_lat, b.start_lng),

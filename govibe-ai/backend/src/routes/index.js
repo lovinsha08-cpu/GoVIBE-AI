@@ -6,6 +6,7 @@ import spotsRoutes from './spots.routes.js';
 import placesRoutes from './places.routes.js';
 import offersRoutes from './offers.routes.js';
 import businessRoutes from './business.routes.js';
+import businessOnboardingRoutes from './businessOnboarding.routes.js';
 import flightsRoutes from './flights.routes.js';
 import assistantRoutes from './assistant.routes.js';
 
@@ -19,6 +20,7 @@ router.use('/spots', spotsRoutes);
 router.use('/places', placesRoutes);
 router.use('/offers', offersRoutes);
 router.use('/business', businessRoutes);
+router.use('/business-onboarding', businessOnboardingRoutes);
 router.use('/flights', flightsRoutes);
 router.use('/assistant', assistantRoutes);
 

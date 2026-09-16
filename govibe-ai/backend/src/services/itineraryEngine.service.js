@@ -2,7 +2,7 @@ import { loadSpots } from './spotData.service.js';
 import {
   selectBalancedSpots, findHiddenGems, hiddenGemReason, nearestInCategory,
   splitRouteAndMealPools, diversifyConsecutive, selectFallbackFamousSpots,
-  capStopsByCategory,
+  capStopsByCategory, selectSpots,
 } from './spotMatching.service.js';
 import { filterGenuineTouristSpots, isValidItineraryStop } from './attractionFilter.service.js';
 import { classifyAttractionTier } from './attractionRanking.service.js';
@@ -1192,7 +1192,7 @@ export async function regenerateStop(trip, itinerary, stopOrder) {
   const entryCost = estimateSpotEntryCost(replacement, {
     adults: trip.adults, kids: trip.kids, elderly: trip.elderly, speciallyAbled: trip.specially_abled,
   });
-  const reasoning = await explainSpotChoice(replacement, { interestLabels });
+  const reasoning = 'Swapped for another spot that better matches your interests.';
 
   // "Nearby food recommendation" on non-food attraction stops was removed
   // itinerary-wide (see the same comment in the main generation loop
