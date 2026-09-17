@@ -16,7 +16,7 @@ async function request(path, options = {}) {
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders(), ...options.headers },
       ...options,
     });
-  } catch (networkErr) {
+  } catch {
     // The browser's fetch() throws a bare "Failed to fetch" TypeError when it
     // can't even reach the server (backend down, wrong port/URL, or blocked
     // by CORS). Surface something actionable instead of that generic message.

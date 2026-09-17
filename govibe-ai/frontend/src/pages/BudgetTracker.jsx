@@ -34,7 +34,7 @@ export default function BudgetTracker() {
       .then((res) => setItinerary(res.itinerary))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [tripId]);
+  }, [tripId, itinerary]);
 
   const budget = itinerary?.budget_summary || {};
   const totalBudget = budget.total_budget_inr || 0;

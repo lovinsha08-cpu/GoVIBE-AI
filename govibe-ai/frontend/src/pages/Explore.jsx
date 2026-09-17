@@ -41,7 +41,7 @@ export default function Explore() {
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [activeFilter, hiddenGemCategory]);
+  }, [activeFilter, hiddenGemCategory, isHiddenGems]);
 
   return (
     <div className="min-h-screen bg-[#EAF7EF] px-4 sm:px-6 py-8 max-w-2xl mx-auto">

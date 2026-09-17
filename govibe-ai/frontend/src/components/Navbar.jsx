@@ -1,4 +1,4 @@
-import { useState } from 'react';
+
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Compass } from 'lucide-react';
@@ -11,7 +11,6 @@ const NAV_LINKS = [
 
 export default function Navbar({ active = 'Explore' }) {
   const navigate = useNavigate();
-  const [scrolled, setScrolled] = useState(false);
 
   return (
     <header className="sticky top-0 z-40 bg-[#EAF7EF]/90 backdrop-blur-md border-b border-[#0C3B5E]/8">

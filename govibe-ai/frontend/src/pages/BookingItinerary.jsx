@@ -55,7 +55,7 @@ export default function BookingItinerary() {
       .then((res) => setItinerary(res.itinerary))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [tripId]);
+  }, [tripId, itinerary]);
 
   const items = useMemo(
     () => itinerary?.budget_summary?.ai_extras?.booking_itinerary || [],

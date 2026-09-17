@@ -25,7 +25,7 @@ export default function Step1Destination({ data, update }) {
             [`${field}_lng`]: lng,
             [field]: locationName,
           });
-        } catch (error) {
+        } catch {
           update({
             [`${field}_lat`]: lat,
             [`${field}_lng`]: lng,

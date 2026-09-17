@@ -4,17 +4,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Clock, Car, RefreshCw, Ticket, ShieldPlus, Download,
   Wallet, ChevronDown, Gem, Loader2, Compass, CloudRain, Sun, Cloud,
-  UtensilsCrossed, Bus, Sparkles, Plus, X, Trash2,
+  UtensilsCrossed, Bus, Sparkles,
   Phone, MapPinned, CalendarHeart, Luggage, TimerReset, ListChecks, Gauge,
   Flag, ArrowDown, Route, Footprints, Bike, Train, TrainFront, Ship,
-  ExternalLink, TicketCheck, BadgeCheck, Zap, IndianRupee, Building2, Star,
+  ExternalLink, BadgeCheck, Zap, IndianRupee, Building2, Star,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { buildGoogleMapsNavigationUrl, openInGoogleMaps } from '../lib/googleMapsNavigation';
 import RealMap from '../components/RealMap';
-
-const CROWD_COLOR = { low: '#16A34A', moderate: '#22C55E', high: '#2563EB' };
-
 /** A start-of-journey or end-of-journey marker card (the bookends of the timeline). */
 function JourneyEndpoint({ icon: Icon, label, location, time, timeLabel }) {
   if (!location) return null;
@@ -258,7 +255,6 @@ export default function ItineraryResults() {
   const [loading, setLoading] = useState(!routerLocation.state?.itinerary);
   const [regenerating, setRegenerating] = useState(false);
   const [regeneratingStop, setRegeneratingStop] = useState(null); // stop order currently regenerating
-  const [activePanel, setActivePanel] = useState(null);
   const [error, setError] = useState('');
   const [stopError, setStopError] = useState('');
   const [downloading, setDownloading] = useState(false);
@@ -270,7 +266,7 @@ export default function ItineraryResults() {
       .then((res) => setItinerary(res.itinerary))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [tripId]);
+  }, [tripId, itinerary]);
 
   const handleRegenerate = async () => {
     setRegenerating(true);
@@ -319,7 +315,7 @@ export default function ItineraryResults() {
     }
   };
 
-  const stops = itinerary?.stops || [];
+  const stops = useMemo(() => itinerary?.stops || [], [itinerary]);
   // Group stops by day (falls back to a single "Day 1" group for older
   // saved itineraries generated before day-by-day tagging existed).
   const dayGroups = useMemo(() => {
